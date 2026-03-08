@@ -1,12 +1,70 @@
 ---
 name: deployment-error-fixer
-description: Expert knowledge for autonomously detecting and fixing logic errors in Python and Bicep deployment code. Handles syntax errors, validation failures, and common deployment issues to enable fully autonomous deployment workflows.
+description: |
+  Autonomously detect and fix logic errors in Python and Bicep deployment code for the AOS infrastructure. Handles syntax errors, validation failures, and common deployment issues to enable fully autonomous deployment workflows.
+  USE FOR: fix Python syntax errors, fix Bicep BCP errors, resolve deployment logic failures, fix missing imports, fix parameter validation errors, auto-repair deployment code, pre-deployment validation, lint → validate → what-if → deploy pipeline.
+  DO NOT USE FOR: environmental deployment failures (retry with backoff instead), infrastructure architecture changes (use azure-prepare), compliance scanning (use azure-compliance), cost analysis (use azure-cost-optimization).
+license: MIT
+metadata:
+  author: ASISaga
+  version: "2.0"
+  category: azure-infrastructure
+  role: deployment-specialist
+allowed-tools: Bash(az:*) Bash(pylint:*) Bash(python:*) Read Edit
 ---
 
 # Deployment Error Fixer Skill
 
 ## Description
-Expert skill for autonomously analyzing and fixing logic errors in deployment code (Python and Bicep). This skill enables the deployment agent to handle not just environmental failures, but also code-level issues without requiring manual developer intervention.
+Expert skill for autonomously analyzing and fixing logic errors in deployment code (Python and Bicep). This skill enables the deployment agent to handle not just environmental failures, but also code-level issues without requiring manual developer intervention. It enforces the AOS deployment pipeline: **lint → validate → what-if → deploy**.
+
+## Triggers
+
+Activate this skill when:
+- Python linting errors are detected in `deployment/orchestrator/` code
+- Python syntax errors occur during deployment execution
+- Bicep validation errors (BCP error codes) are found
+- Bicep template errors prevent successful deployment
+- Parameter validation fails
+- Initial deployment attempt fails with logic errors
+- Running preflight validation before a deployment
+
+## Rules
+
+1. **Validate before deploying** — Always run `pylint` + `az bicep build` + `az deployment group what-if` before applying changes
+2. **Minimal changes** — Fix only the broken code, preserve style and formatting
+3. **Log all fixes** — Document what was changed and why in the audit trail
+4. **Safety first** — Follow [Global Rules](references/global-rules.md) for destructive actions
+5. ⛔ **Never auto-fix production security configurations** — requires human approval
+6. ⛔ **Destructive actions require user confirmation** — [Global Rules](references/global-rules.md)
+
+## Deployment Pipeline (AOS)
+
+The AOS deployment pipeline enforced by this skill:
+
+```
+lint (pylint)
+    ↓
+validate (az bicep build)
+    ↓
+what-if (az deployment group what-if)
+    ↓
+deploy (az deployment group create)
+    ↓
+health checks
+```
+
+See [Pre-Deploy Checklist](references/pre-deploy-checklist.md) for the full validation sequence.
+
+## MCP Tools
+
+When Azure MCP is available:
+
+| Tool | Purpose |
+|------|---------|
+| `mcp_azure_mcp_subscription_list` | Confirm active subscription before deploying |
+| `mcp_azure_mcp_group_list` | Verify resource group exists |
+| `mcp_azure_mcp_extension_cli_generate` | Generate CLI commands for Bicep fixes |
 
 ## When to Use This Skill
 - When Python linting errors are detected in deployment/orchestrator/ code
@@ -333,5 +391,14 @@ This skill enables the deployment agent to:
 2. ✅ Analyze error context and patterns
 3. ✅ Apply automatic fixes for common issues
 4. ✅ Validate fixes before re-attempting deployment
-5. ✅ Ask for help when uncertain
-6. ✅ Maintain safety constraints for critical changes
+5. ✅ Enforce the lint → validate → what-if → deploy pipeline
+6. ✅ Ask for help when uncertain
+7. ✅ Maintain safety constraints for critical changes
+
+## Related Documentation
+
+- [Pre-Deploy Checklist](references/pre-deploy-checklist.md) — Full validation sequence before deploying
+- [Global Rules](references/global-rules.md) — Safety rules for destructive actions
+- [Repository Spec](../../specs/repository.md) — AOS deployment pipeline details
+- [Infrastructure Deploy Workflow](../../workflows/infrastructure-deploy.yml)
+- [Azure Troubleshooting Skill](../azure-troubleshooting/SKILL.md)

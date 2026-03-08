@@ -1,12 +1,33 @@
 ---
 name: azure-troubleshooting
-description: Expert knowledge for troubleshooting Azure infrastructure issues in the Agent Operating System. Provides diagnostic procedures, common issue patterns, and resolution strategies for deployment failures, performance problems, and connectivity issues.
+description: |
+  Debug and troubleshoot production Azure infrastructure issues in the Agent Operating System. Covers systematic diagnostics, log analysis with KQL, resource health checks, and resolution of deployment failures, performance problems, and connectivity issues.
+  USE FOR: debug Azure issues, troubleshoot deployment failures, analyze logs with KQL, fix connectivity issues, resolve resource provisioning errors, investigate health probe failures, check resource health, view application logs, find root cause of errors, diagnose AOS Function App issues, fix Service Bus connection failures, resolve Key Vault access problems.
+  DO NOT USE FOR: deploying infrastructure (use deployment-error-fixer), creating new resources (use azure-prepare), setting up monitoring alerts (use azure-observability), cost analysis (use azure-cost-optimization).
+license: MIT
+metadata:
+  author: ASISaga
+  version: "2.0"
+  category: azure-infrastructure
+  role: troubleshooting-specialist
+allowed-tools: Bash(az:*) Bash(gh:*) Read
 ---
 
 # Azure Troubleshooting Skill
 
 ## Description
-Expert skill for diagnosing and resolving Azure infrastructure issues in the Agent Operating System (AOS). This skill provides systematic troubleshooting procedures, common error patterns, and resolution strategies for the most frequent issues encountered in Azure deployments.
+Expert skill for diagnosing and resolving Azure infrastructure issues in the Agent Operating System (AOS). This skill provides systematic troubleshooting procedures, common error patterns, MCP tool integrations, and resolution strategies for the most frequent issues encountered in Azure deployments.
+
+## Triggers
+
+Activate this skill when user wants to:
+- Debug or troubleshoot production issues
+- Diagnose errors in Azure services
+- Analyze application logs or metrics with KQL
+- Fix image pull, cold start, or health probe issues
+- Investigate why Azure resources are failing
+- Find root cause of application errors
+- Diagnose AOS-specific failures (Function App, Service Bus, Key Vault)
 
 ## When to Use This Skill
 - Deployment failures in Azure
@@ -15,6 +36,63 @@ Expert skill for diagnosing and resolving Azure infrastructure issues in the Age
 - Resource provisioning errors
 - Configuration problems
 - After automated diagnostics detect issues
+
+## Quick Diagnosis Flow
+
+1. **Identify symptoms** — What's failing? Error code? Service?
+2. **Check resource health** — Is Azure healthy? Use AppLens or Resource Health API.
+3. **Review logs** — What do logs show? Use KQL queries in Log Analytics.
+4. **Analyze metrics** — Performance patterns with Azure Monitor.
+5. **Investigate recent changes** — What changed? Check Activity Log.
+
+## MCP Tools
+
+When Azure MCP is enabled, prefer these tools over CLI for faster diagnostics:
+
+### AppLens (AI-Powered Diagnostics)
+```
+mcp_azure_mcp_applens
+  intent: "diagnose issues with <resource-name>"
+  command: "diagnose"
+  parameters:
+    resourceId: "<resource-id>"
+
+Provides:
+- Automated issue detection
+- Root cause analysis
+- Remediation recommendations
+```
+
+### Azure Monitor (Logs & Metrics)
+```
+mcp_azure_mcp_monitor
+  intent: "query logs for <resource-name>"
+  command: "logs_query"
+  parameters:
+    workspaceId: "<log-analytics-workspace-id>"
+    query: "<KQL-query>"
+```
+
+See [KQL Query Reference](references/kql-queries.md) for common diagnostic queries.
+
+### Resource Health
+```
+mcp_azure_mcp_resourcehealth
+  intent: "check health status of <resource-name>"
+  command: "get"
+  parameters:
+    resourceId: "<resource-id>"
+```
+
+### Azure Resource Graph (Cross-Resource Diagnostics)
+Use the Resource Graph for fast cross-subscription queries to find failed or unhealthy resources:
+```bash
+# Requires: az extension add --name resource-graph
+az graph query -q "HealthResources | where properties.availabilityState != 'Available' | project name, state=properties.availabilityState"
+```
+See [Azure Resource Graph Queries](references/azure-resource-graph.md) for diagnostic query patterns.
+
+---
 
 ## Common Azure Issues and Resolutions
 
@@ -224,7 +302,30 @@ az deployment group list -g rg-aos-dev
 
 # Network connectivity
 curl -v https://<endpoint>
+
+# AOS Function App logs
+az functionapp logs tail --name <function-app-name> -g rg-aos-dev
+az monitor log-analytics query \
+  --workspace <workspace-id> \
+  --analytics-query "AppRequests | where Success == false | take 20"
+
+# Resource Graph: find all failed resources
+az graph query -q "Resources | where properties.provisioningState != 'Succeeded' | project name, type, resourceGroup, provisioningState=properties.provisioningState"
 ```
+
+### KQL Queries
+
+See [KQL Query Reference](references/kql-queries.md) for commonly used queries:
+- Recent errors and exceptions
+- Failed and slow requests
+- Dependency failures
+
+### Azure Resource Graph
+
+See [Azure Resource Graph Queries](references/azure-resource-graph.md) for:
+- Cross-subscription health status queries
+- Failed or stuck deployment detection
+- Active service health incidents
 
 ## Best Practices
 
@@ -259,6 +360,8 @@ Use the infrastructure-troubleshooting workflow for automated diagnostics and co
 
 ## Related Documentation
 
+- [KQL Query Reference](references/kql-queries.md) — Common KQL queries for AOS diagnostics
+- [Azure Resource Graph Queries](references/azure-resource-graph.md) — Cross-resource diagnostic patterns
 - [Infrastructure Monitoring Workflow](../../workflows/infrastructure-monitoring.yml)
 - [Infrastructure Troubleshooting Workflow](../../workflows/infrastructure-troubleshooting.yml)
 - [Deployment Error Fixer Skill](../deployment-error-fixer/SKILL.md)
