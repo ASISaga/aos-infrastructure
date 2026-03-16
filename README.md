@@ -176,17 +176,62 @@ hm.check_disaster_recovery_readiness()
 - **RBAC Review** — Privileged-access review and least-privilege enforcement
 - **Drift Detection** — Detect infrastructure drift via Bicep what-if or manifest comparison
 - **DR Readiness** — Key Vault soft-delete, geo-replication, and purge-protection checks
+- **Custom Domains** — 16 `*.asisaga.com` hostnames bound with free App Service Managed Certificates and SNI TLS
 
 ## No Runtime Dependency
 
 This repository has **zero Python runtime dependency** on `aos-kernel` or any AOS package. The deployment orchestrator is a standalone CLI tool.
 
+## DNS Prerequisites
+
+All 16 production Function Apps use custom `*.asisaga.com` hostnames.  **CNAME records
+must exist in your DNS provider before running the deployment with custom domains
+enabled** — the hostname-binding step in `functionapp.bicep` fails if the CNAME is absent.
+
+See [docs/dns-setup.md](docs/dns-setup.md) for the complete CNAME list, DNS provider
+configuration, and the recommended two-phase deployment procedure.
+
 ## Related Repositories
 
-- [aos-kernel](https://github.com/ASISaga/aos-kernel) — OS kernel
-- [aos-dispatcher](https://github.com/ASISaga/aos-dispatcher) — Main Azure Functions app
-- [aos-realm-of-agents](https://github.com/ASISaga/aos-realm-of-agents) — RealmOfAgents function app
-- [aos-mcp-servers](https://github.com/ASISaga/aos-mcp-servers) — MCPServers function app
+### Platform services
+
+| Repository | Role | Custom domain |
+|-----------|------|---------------|
+| [aos-kernel](https://github.com/ASISaga/aos-kernel) | OS kernel and agent runtime | `aos-kernel.asisaga.com` |
+| [aos-dispatcher](https://github.com/ASISaga/aos-dispatcher) | Central orchestration hub | `aos-dispatcher.asisaga.com` |
+| [aos-intelligence](https://github.com/ASISaga/aos-intelligence) | Intelligence layer | `aos-intelligence.asisaga.com` |
+| [aos-realm-of-agents](https://github.com/ASISaga/aos-realm-of-agents) | Agent catalog and capability registry | `aos-realm-of-agents.asisaga.com` |
+| [aos-mcp-servers](https://github.com/ASISaga/aos-mcp-servers) | MCP server framework | `aos-mcp-servers.asisaga.com` |
+| [aos-client-sdk](https://github.com/ASISaga/aos-client-sdk) | Client SDK and Azure Functions scaffolding | `aos-client-sdk.asisaga.com` |
+| [business-infinity](https://github.com/ASISaga/business-infinity) | Business application | `business-infinity.asisaga.com` |
+
+### C-suite agents
+
+| Repository | Role | Custom domain |
+|-----------|------|---------------|
+| [ceo-agent](https://github.com/ASISaga/ceo-agent) | CEO C-suite agent | `ceo-agent.asisaga.com` |
+| [cfo-agent](https://github.com/ASISaga/cfo-agent) | CFO C-suite agent | `cfo-agent.asisaga.com` |
+| [cto-agent](https://github.com/ASISaga/cto-agent) | CTO C-suite agent | `cto-agent.asisaga.com` |
+| [cso-agent](https://github.com/ASISaga/cso-agent) | CSO C-suite agent | `cso-agent.asisaga.com` |
+| [cmo-agent](https://github.com/ASISaga/cmo-agent) | CMO C-suite agent | `cmo-agent.asisaga.com` |
+
+### Base agent classes _(not deployed directly)_
+
+| Repository | Role |
+|-----------|------|
+| [purpose-driven-agent](https://github.com/ASISaga/purpose-driven-agent) | Base class for purpose-driven agents |
+| [leadership-agent](https://github.com/ASISaga/leadership-agent) | Base class for leadership agents |
+
+### MCP server submodules
+
+Each MCP server repository name doubles as its custom domain — see [DNS Setup](docs/dns-setup.md#mcp-server-domains) for the rationale.
+
+| Repository | Role | Custom domain |
+|-----------|------|---------------|
+| [erpnext.asisaga.com](https://github.com/ASISaga/erpnext.asisaga.com) | ERPNext MCP server | `erpnext.asisaga.com` |
+| [linkedin.asisaga.com](https://github.com/ASISaga/linkedin.asisaga.com) | LinkedIn MCP server | `linkedin.asisaga.com` |
+| [reddit.asisaga.com](https://github.com/ASISaga/reddit.asisaga.com) | Reddit MCP server | `reddit.asisaga.com` |
+| [subconscious.asisaga.com](https://github.com/ASISaga/subconscious.asisaga.com) | Subconscious MCP server | `subconscious.asisaga.com` |
 
 ## License
 

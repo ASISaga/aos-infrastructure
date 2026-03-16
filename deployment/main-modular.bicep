@@ -303,8 +303,10 @@ module mcpServerFunctionApps 'modules/functionapp.bicep' = [for mcpApp in mcpSer
     foundryProjectEndpoint: aiProject.outputs.projectDiscoveryUrl
     aiGatewayUrl: aiGateway.outputs.gatewayUrl
     aiServicesAccountId: aiServices.outputs.accountId
-    // Custom domain: githubRepo IS the full domain for MCP servers (e.g. erpnext.asisaga.com)
-    customDomain: mcpApp.githubRepo
+    // Custom domain: githubRepo IS the full domain for MCP servers (e.g. erpnext.asisaga.com).
+    // Conditional on baseDomain being non-empty so that dev/staging environments that set
+    // baseDomain='' skip custom domain binding for both standard AOS apps and MCP servers.
+    customDomain: !empty(baseDomain) ? mcpApp.githubRepo : ''
   }
 }]
 

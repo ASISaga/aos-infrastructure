@@ -1,8 +1,8 @@
 # aos-infrastructure Repository Specification
 
-**Version**: 1.0.0  
+**Version**: 1.1.0  
 **Status**: Active  
-**Last Updated**: 2026-03-07
+**Last Updated**: 2026-03-16
 
 ## Overview
 
@@ -32,7 +32,7 @@
 |-----------|-----------|
 | Runtime | Python 3.10+ |
 | Configuration | `pydantic>=2.12.0` — type-safe `DeploymentConfig` |
-| Infrastructure-as-Code | Azure Bicep (14 modules) |
+| Infrastructure-as-Code | Azure Bicep (16 modules) |
 | Deployment | Azure Resource Manager via `az deployment group` |
 | Tests | `pytest>=8.0.0` |
 | Linter | `pylint>=3.0.0` (max line length: 120) |
@@ -44,7 +44,7 @@
 ```
 deployment/
 ├── deploy.py                      # CLI entry point — all subcommands
-├── main-modular.bicep             # Primary Bicep template (14 modules)
+├── main-modular.bicep             # Primary Bicep template (16 modules)
 ├── modules/                       # Bicep modules
 │   ├── policy.bicep               # Azure Policy (Governance pillar)
 │   ├── budget.bicep               # Cost Management (Governance pillar)
@@ -52,7 +52,8 @@ deployment/
 │   ├── storage.bicep
 │   ├── keyvault.bicep
 │   ├── servicebus.bicep
-│   ├── functionapp.bicep
+│   ├── functionapp.bicep          # FC1 Flex Consumption + custom domain (three-phase binding)
+│   ├── functionapp-ssl.bicep      # SNI TLS re-binding sub-module (Phase 3)
 │   └── ai-*.bicep                 # AI hub, gateway, project, services, model-registry, lora-inference
 ├── parameters/                    # Environment-specific Bicep parameters
 │   ├── dev.bicepparam
@@ -206,13 +207,26 @@ python deployment/deploy.py plan --resource-group my-rg --location eastus --envi
 
 ## Related Repositories
 
-| Repository | Role |
-|-----------|------|
-| [aos-kernel](https://github.com/ASISaga/aos-kernel) | OS kernel |
-| [aos-dispatcher](https://github.com/ASISaga/aos-dispatcher) | Main Azure Functions app |
-| [aos-realm-of-agents](https://github.com/ASISaga/aos-realm-of-agents) | RealmOfAgents function app |
-| [aos-mcp-servers](https://github.com/ASISaga/aos-mcp-servers) | MCPServers function app |
-| [aos-client-sdk](https://github.com/ASISaga/aos-client-sdk) | Client SDK & App Framework |
+| Repository | Role | Custom domain |
+|-----------|------|---------------|
+| [aos-kernel](https://github.com/ASISaga/aos-kernel) | OS kernel | `aos-kernel.asisaga.com` |
+| [aos-dispatcher](https://github.com/ASISaga/aos-dispatcher) | Central orchestration hub | `aos-dispatcher.asisaga.com` |
+| [aos-intelligence](https://github.com/ASISaga/aos-intelligence) | Intelligence layer | `aos-intelligence.asisaga.com` |
+| [aos-realm-of-agents](https://github.com/ASISaga/aos-realm-of-agents) | Agent catalog | `aos-realm-of-agents.asisaga.com` |
+| [aos-mcp-servers](https://github.com/ASISaga/aos-mcp-servers) | MCP server framework | `aos-mcp-servers.asisaga.com` |
+| [aos-client-sdk](https://github.com/ASISaga/aos-client-sdk) | Client SDK & App Framework | `aos-client-sdk.asisaga.com` |
+| [business-infinity](https://github.com/ASISaga/business-infinity) | Business application | `business-infinity.asisaga.com` |
+| [ceo-agent](https://github.com/ASISaga/ceo-agent) | CEO C-suite agent | `ceo-agent.asisaga.com` |
+| [cfo-agent](https://github.com/ASISaga/cfo-agent) | CFO C-suite agent | `cfo-agent.asisaga.com` |
+| [cto-agent](https://github.com/ASISaga/cto-agent) | CTO C-suite agent | `cto-agent.asisaga.com` |
+| [cso-agent](https://github.com/ASISaga/cso-agent) | CSO C-suite agent | `cso-agent.asisaga.com` |
+| [cmo-agent](https://github.com/ASISaga/cmo-agent) | CMO C-suite agent | `cmo-agent.asisaga.com` |
+| [purpose-driven-agent](https://github.com/ASISaga/purpose-driven-agent) | Base agent class | _(not deployed directly)_ |
+| [leadership-agent](https://github.com/ASISaga/leadership-agent) | Base leadership class | _(not deployed directly)_ |
+| [erpnext.asisaga.com](https://github.com/ASISaga/erpnext.asisaga.com) | ERPNext MCP server | `erpnext.asisaga.com` |
+| [linkedin.asisaga.com](https://github.com/ASISaga/linkedin.asisaga.com) | LinkedIn MCP server | `linkedin.asisaga.com` |
+| [reddit.asisaga.com](https://github.com/ASISaga/reddit.asisaga.com) | Reddit MCP server | `reddit.asisaga.com` |
+| [subconscious.asisaga.com](https://github.com/ASISaga/subconscious.asisaga.com) | Subconscious MCP server | `subconscious.asisaga.com` |
 
 ## Key Design Principles
 
@@ -221,9 +235,12 @@ python deployment/deploy.py plan --resource-group my-rg --location eastus --envi
 3. **Lint before deploy** — Every deployment path runs Bicep linting and what-if analysis first
 4. **Agentic self-healing** — Logic errors are auto-fixed by the `deployment-error-fixer` skill; environmental errors use exponential-backoff retry
 5. **Audit trail** — All deployments emit JSON audit records uploaded as GitHub Actions artifacts (90-day retention)
+6. **Custom domains** — 16 `*.asisaga.com` CNAME records backed by free App Service Managed Certificates; CNAMEs must exist before deploying with `baseDomain` set
 
 ## References
 
+→ **DNS setup guide**: `docs/dns-setup.md` — full CNAME list, DNS requirements, two-phase deployment procedure  
+→ **Deployment architecture**: `docs/architecture.md` — three-tier model, custom domain architecture  
 → **Agent framework**: `.github/specs/agent-intelligence-framework.md`  
 → **Conventional tools**: `.github/docs/conventional-tools.md`  
 → **Python coding standards**: `.github/instructions/python.instructions.md`  
