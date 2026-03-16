@@ -456,6 +456,52 @@ class TestSDKBridge:
         endpoint = bridge.get_aos_endpoint()
         assert endpoint == "https://func-aos-dispatcher-dev.azurewebsites.net"
 
+    def test_default_app_names_includes_mcp_servers(self) -> None:
+        """All four MCP server submodules must be present in the default app names list."""
+        from orchestrator.integration.sdk_bridge import _DEFAULT_APP_NAMES, _MCP_SERVER_APPS
+        for app in _MCP_SERVER_APPS:
+            assert app in _DEFAULT_APP_NAMES, f"'{app}' missing from _DEFAULT_APP_NAMES"
+
+    def test_default_app_names_mcp_names_are_azure_safe(self) -> None:
+        """MCP server app names must not contain dots (Azure resource naming constraint)."""
+        from orchestrator.integration.sdk_bridge import _DEFAULT_APP_NAMES
+        mcp_server_apps = [a for a in _DEFAULT_APP_NAMES if a.startswith("mcp-")]
+        assert len(mcp_server_apps) == 4
+        for app in mcp_server_apps:
+            assert "." not in app, f"'{app}' contains a dot — invalid Azure resource name"
+
+    def test_mcp_server_github_repos_are_full_domains(self) -> None:
+        """MCP server githubRepo values are full domain names (used directly as custom domains).
+
+        _MCP_SERVER_APPS is the single Python-side source of truth and mirrors
+        the mcpServerApps default in main-modular.bicep.
+        """
+        from orchestrator.integration.sdk_bridge import _MCP_SERVER_APPS, _BASE_DOMAIN
+        for app_name, github_repo in _MCP_SERVER_APPS.items():
+            assert "." in github_repo, (
+                f"{app_name}: githubRepo '{github_repo}' is not a full domain — "
+                "MCP server repos must be full domain names so they can be used as custom domains"
+            )
+            assert github_repo.endswith(f".{_BASE_DOMAIN}"), (
+                f"{app_name}: githubRepo '{github_repo}' does not match expected *.{_BASE_DOMAIN} pattern"
+            )
+
+    def test_standard_app_custom_domain_convention(self) -> None:
+        """Standard AOS apps get a custom domain of <appName>.<_BASE_DOMAIN>.
+
+        _BASE_DOMAIN mirrors the baseDomain default in main-modular.bicep.
+        """
+        from orchestrator.integration.sdk_bridge import _DEFAULT_APP_NAMES, _MCP_SERVER_APPS, _BASE_DOMAIN
+        standard_apps = [a for a in _DEFAULT_APP_NAMES if a not in _MCP_SERVER_APPS]
+        assert len(standard_apps) > 0, "Expected at least one non-MCP app in _DEFAULT_APP_NAMES"
+        for app in standard_apps:
+            # appName must be dot-free so the derived domain is well-formed
+            assert "." not in app, f"Standard app '{app}' must not contain dots"
+            derived_domain = f"{app}.{_BASE_DOMAIN}"
+            assert derived_domain.endswith(f".{_BASE_DOMAIN}")
+            # domain must be a valid-looking hostname (at least two dots for a subdomain)
+            assert derived_domain.count(".") >= 2, f"Derived domain '{derived_domain}' has too few labels"
+
 
 # ====================================================================
 # KernelBridge — unit tests

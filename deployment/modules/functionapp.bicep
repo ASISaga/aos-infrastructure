@@ -1,8 +1,17 @@
-// Function App module — FC1 Flex Consumption plan + Function App + User-Assigned Managed Identity + GitHub OIDC + Scoped RBAC
+// Function App module — FC1 Flex Consumption plan + Function App + User-Assigned Managed Identity
+//                       + GitHub OIDC + Custom Domain + App Service Managed Certificate + Scoped RBAC
 // One-app-per-plan pattern required by Flex Consumption.
 // Each app has its own User-Assigned Identity used both as the runtime identity and as the GitHub Actions
 // deployment agent. Workload Identity Federation (OIDC) restricts each identity to exactly one
-// GitHub repository + environment, creating a hard security boundary between the 10 AOS modules.
+// GitHub repository + environment, creating a hard security boundary between the AOS modules.
+//
+// Custom domain setup (three-phase, requires prior DNS configuration):
+//   Phase 1 — hostnameBinding:      bind customDomain without TLS (Disabled)
+//   Phase 2 — managedCertificate:   issue free App Service Managed Certificate for the domain
+//   Phase 3 — sslBinding (module):  re-bind with SNI TLS linked to the certificate thumbprint
+//
+// DNS prerequisite: a CNAME record  `<customDomain>` → `<functionAppName>.azurewebsites.net`
+// must exist before deployment.  Skip by leaving customDomain empty.
 
 @description('Azure region')
 param location string
@@ -53,6 +62,12 @@ param githubOrg string
 
 @description('GitHub Actions environment name used as the OIDC subject bound to this app. Defaults to the deployment environment value.')
 param githubEnvironment string = environment
+
+@description('GitHub repository name for the OIDC Workload Identity Federation subject. Defaults to appName when the repo name matches the app name. Override when the GitHub repo name differs from appName (e.g. MCP servers whose repo names contain dots).')
+param githubRepo string = appName
+
+@description('Custom domain hostname to bind to this Function App and secure with a free App Service Managed Certificate (e.g. erpnext.asisaga.com or aos-dispatcher.asisaga.com). Requires a DNS CNAME record pointing this domain to the app\'s default azurewebsites.net hostname before deployment — deployment will fail at the hostname binding step if the CNAME is absent. Leave empty to skip custom domain setup entirely.')
+param customDomain string = ''
 
 @description('Azure AI Foundry project discovery URL for Foundry Agent Service orchestration')
 param foundryProjectEndpoint string = ''
@@ -111,7 +126,7 @@ resource federatedCredential 'Microsoft.ManagedIdentity/userAssignedIdentities/f
   name: 'github-${appName}-${environment}'
   properties: {
     issuer: 'https://token.actions.githubusercontent.com'
-    subject: 'repo:${githubOrg}/${appName}:environment:${githubEnvironment}'
+    subject: 'repo:${githubOrg}/${githubRepo}:environment:${githubEnvironment}'
     audiences: [
       'api://AzureADTokenExchange'
     ]
@@ -231,6 +246,8 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
         { name: 'AI_GATEWAY_URL', value: aiGatewayUrl }
         // A2A connections — default connection ID for agent-to-agent communication
         { name: 'A2A_CONNECTION_ID_DEFAULT', value: 'a2a-connection-${appName}' }
+        // Custom domain — the public hostname bound to this Function App (empty if not configured)
+        { name: 'CUSTOM_DOMAIN', value: customDomain }
       ]
     }
   }
@@ -345,6 +362,46 @@ resource azureAIDeveloperRoleAssignment 'Microsoft.Authorization/roleAssignments
 }
 
 // ====================================================================
+// Custom Domain, App Service Managed Certificate and HTTPS Binding
+// ====================================================================
+// DNS prerequisite: CNAME  <customDomain>  →  <functionAppName>.azurewebsites.net
+// must exist before deployment.  All three resources are conditional on customDomain being set.
+
+// Phase 1 — Bind the custom hostname without TLS so Azure can verify domain ownership.
+resource hostnameBinding 'Microsoft.Web/sites/hostNameBindings@2023-12-01' = if (!empty(customDomain)) {
+  parent: functionApp
+  name: customDomain
+  properties: {
+    sslState: 'Disabled'
+    hostNameType: 'Verified'
+  }
+}
+
+// Phase 2 — Issue a free App Service Managed Certificate for the custom domain.
+// Azure validates ownership via the CNAME record created in the DNS prerequisite step.
+resource managedCertificate 'Microsoft.Web/certificates@2023-12-01' = if (!empty(customDomain)) {
+  name: 'cert-${appName}-${environment}'
+  location: location
+  tags: tags
+  properties: {
+    serverFarmId: appServicePlan.id
+    canonicalName: customDomain
+  }
+  dependsOn: [hostnameBinding]
+}
+
+// Phase 3 — Re-bind the hostname with SNI TLS linked to the managed certificate thumbprint.
+// A sub-module is used to avoid a duplicate resource name in this Bicep scope.
+module sslBinding 'functionapp-ssl.bicep' = if (!empty(customDomain)) {
+  name: 'ssl-${appName}-${environment}'
+  params: {
+    functionAppName: functionApp.name
+    customDomain: customDomain
+    thumbprint: managedCertificate.properties.thumbprint
+  }
+}
+
+// ====================================================================
 // Outputs
 // ====================================================================
 
@@ -353,3 +410,5 @@ output defaultHostName string = functionApp.properties.defaultHostName
 output principalId string = userAssignedIdentity.properties.principalId
 // clientId is used as the AZURE_CLIENT_ID GitHub Actions secret for this repository's deployment workflow
 output clientId string = userAssignedIdentity.properties.clientId
+output customDomain string = customDomain
+output customDomainUrl string = !empty(customDomain) ? 'https://${customDomain}' : ''

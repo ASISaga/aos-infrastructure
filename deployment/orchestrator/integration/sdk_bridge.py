@@ -35,7 +35,25 @@ _DEFAULT_APP_NAMES: list[str] = [
     "aos-client-sdk",
     "business-infinity",
     "aos-dispatcher",
+    # MCP server submodules from ASISaga/mcp
+    "mcp-erpnext",
+    "mcp-linkedin",
+    "mcp-reddit",
+    "mcp-subconscious",
 ]
+
+# Base domain for standard AOS app custom hostnames — mirrors the baseDomain default in main-modular.bicep.
+# Standard apps get <appName>.<_BASE_DOMAIN> (e.g. aos-dispatcher.asisaga.com).
+_BASE_DOMAIN: str = "asisaga.com"
+
+# MCP server submodule mapping: Azure-safe app name → GitHub repo name (which IS the custom domain).
+# Mirrors the mcpServerApps default in main-modular.bicep.
+_MCP_SERVER_APPS: dict[str, str] = {
+    "mcp-erpnext": "erpnext.asisaga.com",
+    "mcp-linkedin": "linkedin.asisaga.com",
+    "mcp-reddit": "reddit.asisaga.com",
+    "mcp-subconscious": "subconscious.asisaga.com",
+}
 
 
 @dataclass

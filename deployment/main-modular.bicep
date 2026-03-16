@@ -11,6 +11,7 @@
 //   - AI Gateway (API Management) for rate limiting and JWT validation
 //   - A2A Connections (Agent-to-Agent) for C-suite boardroom orchestration
 //   - One dedicated FC1 Flex Consumption Plan + Function App per AOS module (12 deployed)
+//   - One dedicated FC1 Flex Consumption Plan + Function App per MCP server module (4 deployed)
 //   - RBAC role assignments (identity-based connections, no secrets in env vars)
 
 targetScope = 'resourceGroup'
@@ -75,6 +76,17 @@ param appNames array = [
   'business-infinity'
   'aos-dispatcher'
 ]
+
+@description('List of MCP server modules from the ASISaga/mcp repository and its submodules. Each entry specifies the Azure-safe app name and the actual GitHub repository name (which may contain dots) used for Workload Identity Federation.')
+param mcpServerApps array = [
+  { appName: 'mcp-erpnext', githubRepo: 'erpnext.asisaga.com' }
+  { appName: 'mcp-linkedin', githubRepo: 'linkedin.asisaga.com' }
+  { appName: 'mcp-reddit', githubRepo: 'reddit.asisaga.com' }
+  { appName: 'mcp-subconscious', githubRepo: 'subconscious.asisaga.com' }
+]
+
+@description('Base domain used to construct custom hostnames for standard AOS module apps (e.g. asisaga.com produces aos-dispatcher.asisaga.com). MCP server apps use their githubRepo value as the custom domain directly. Set to empty string to disable custom domain setup for all apps.')
+param baseDomain string = 'asisaga.com'
 
 // ====================================================================
 // Variables
@@ -259,6 +271,42 @@ module functionApps 'modules/functionapp.bicep' = [for appName in appNames: {
     foundryProjectEndpoint: aiProject.outputs.projectDiscoveryUrl
     aiGatewayUrl: aiGateway.outputs.gatewayUrl
     aiServicesAccountId: aiServices.outputs.accountId
+    // Custom domain: <appName>.<baseDomain> (e.g. aos-dispatcher.asisaga.com)
+    customDomain: !empty(baseDomain) ? '${appName}.${baseDomain}' : ''
+  }
+}]
+
+// One dedicated FC1 Flex Consumption plan + Function App per MCP server submodule.
+// The githubRepo param passes the actual GitHub repository name (which may contain dots)
+// for Workload Identity Federation, while appName is an Azure-safe identifier.
+module mcpServerFunctionApps 'modules/functionapp.bicep' = [for mcpApp in mcpServerApps: {
+  name: 'functionapp-${mcpApp.appName}-${suffix}'
+  params: {
+    location: location
+    environment: environment
+    appName: mcpApp.appName
+    githubRepo: mcpApp.githubRepo
+    uniqueSuffix: uniqueSuffix
+    tags: tags
+    storageAccountName: storage.outputs.storageAccountName
+    storageAccountId: storage.outputs.storageAccountId
+    appInsightsConnectionString: monitoring.outputs.connectionString
+    serviceBusNamespace: serviceBus.outputs.namespaceName
+    serviceBusId: serviceBus.outputs.namespaceId
+    keyVaultName: keyVault.outputs.keyVaultName
+    keyVaultId: keyVault.outputs.keyVaultId
+    tableServiceUri: storage.outputs.tableServiceUri
+    coreAppUrl: coreAppUrl
+    githubOrg: githubOrg
+    githubEnvironment: environment
+    // Foundry Agent Service — project endpoint and AI Gateway URL
+    foundryProjectEndpoint: aiProject.outputs.projectDiscoveryUrl
+    aiGatewayUrl: aiGateway.outputs.gatewayUrl
+    aiServicesAccountId: aiServices.outputs.accountId
+    // Custom domain: githubRepo IS the full domain for MCP servers (e.g. erpnext.asisaga.com).
+    // Conditional on baseDomain being non-empty so that dev/staging environments that set
+    // baseDomain='' skip custom domain binding for both standard AOS apps and MCP servers.
+    customDomain: !empty(baseDomain) ? mcpApp.githubRepo : ''
   }
 }]
 
@@ -290,6 +338,13 @@ output resourceGroupName string = resourceGroup().name
 output functionAppNames array = [for (appName, i) in appNames: functionApps[i].outputs.functionAppName]
 // clientId per app — use as the AZURE_CLIENT_ID GitHub Actions secret in each repository's deployment workflow
 output functionAppClientIds array = [for (appName, i) in appNames: functionApps[i].outputs.clientId]
+// Custom domain per standard AOS app (e.g. aos-dispatcher.asisaga.com)
+output functionAppCustomDomains array = [for (appName, i) in appNames: functionApps[i].outputs.customDomain]
+// MCP server function app outputs — clientId per MCP server for GitHub Actions OIDC deployment
+output mcpServerFunctionAppNames array = [for (mcpApp, i) in mcpServerApps: mcpServerFunctionApps[i].outputs.functionAppName]
+output mcpServerFunctionAppClientIds array = [for (mcpApp, i) in mcpServerApps: mcpServerFunctionApps[i].outputs.clientId]
+// Custom domain per MCP server (equals githubRepo, e.g. erpnext.asisaga.com)
+output mcpServerCustomDomains array = [for (mcpApp, i) in mcpServerApps: mcpServerFunctionApps[i].outputs.customDomain]
 output storageAccountName string = storage.outputs.storageAccountName
 output serviceBusNamespace string = serviceBus.outputs.namespaceName
 output keyVaultName string = keyVault.outputs.keyVaultName
