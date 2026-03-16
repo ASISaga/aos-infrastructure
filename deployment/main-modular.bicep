@@ -85,6 +85,9 @@ param mcpServerApps array = [
   { appName: 'mcp-subconscious', githubRepo: 'subconscious.asisaga.com' }
 ]
 
+@description('Base domain used to construct custom hostnames for standard AOS module apps (e.g. asisaga.com produces aos-dispatcher.asisaga.com). MCP server apps use their githubRepo value as the custom domain directly. Set to empty string to disable custom domain setup for all apps.')
+param baseDomain string = 'asisaga.com'
+
 // ====================================================================
 // Variables
 // ====================================================================
@@ -268,6 +271,8 @@ module functionApps 'modules/functionapp.bicep' = [for appName in appNames: {
     foundryProjectEndpoint: aiProject.outputs.projectDiscoveryUrl
     aiGatewayUrl: aiGateway.outputs.gatewayUrl
     aiServicesAccountId: aiServices.outputs.accountId
+    // Custom domain: <appName>.<baseDomain> (e.g. aos-dispatcher.asisaga.com)
+    customDomain: !empty(baseDomain) ? '${appName}.${baseDomain}' : ''
   }
 }]
 
@@ -298,6 +303,8 @@ module mcpServerFunctionApps 'modules/functionapp.bicep' = [for mcpApp in mcpSer
     foundryProjectEndpoint: aiProject.outputs.projectDiscoveryUrl
     aiGatewayUrl: aiGateway.outputs.gatewayUrl
     aiServicesAccountId: aiServices.outputs.accountId
+    // Custom domain: githubRepo IS the full domain for MCP servers (e.g. erpnext.asisaga.com)
+    customDomain: mcpApp.githubRepo
   }
 }]
 
@@ -329,9 +336,13 @@ output resourceGroupName string = resourceGroup().name
 output functionAppNames array = [for (appName, i) in appNames: functionApps[i].outputs.functionAppName]
 // clientId per app — use as the AZURE_CLIENT_ID GitHub Actions secret in each repository's deployment workflow
 output functionAppClientIds array = [for (appName, i) in appNames: functionApps[i].outputs.clientId]
+// Custom domain per standard AOS app (e.g. aos-dispatcher.asisaga.com)
+output functionAppCustomDomains array = [for (appName, i) in appNames: functionApps[i].outputs.customDomain]
 // MCP server function app outputs — clientId per MCP server for GitHub Actions OIDC deployment
 output mcpServerFunctionAppNames array = [for (mcpApp, i) in mcpServerApps: mcpServerFunctionApps[i].outputs.functionAppName]
 output mcpServerFunctionAppClientIds array = [for (mcpApp, i) in mcpServerApps: mcpServerFunctionApps[i].outputs.clientId]
+// Custom domain per MCP server (equals githubRepo, e.g. erpnext.asisaga.com)
+output mcpServerCustomDomains array = [for (mcpApp, i) in mcpServerApps: mcpServerFunctionApps[i].outputs.customDomain]
 output storageAccountName string = storage.outputs.storageAccountName
 output serviceBusNamespace string = serviceBus.outputs.namespaceName
 output keyVaultName string = keyVault.outputs.keyVaultName
