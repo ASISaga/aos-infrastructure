@@ -456,6 +456,21 @@ class TestSDKBridge:
         endpoint = bridge.get_aos_endpoint()
         assert endpoint == "https://func-aos-dispatcher-dev.azurewebsites.net"
 
+    def test_default_app_names_includes_mcp_servers(self) -> None:
+        """All four MCP server submodules must be present in the default app names list."""
+        from orchestrator.integration.sdk_bridge import _DEFAULT_APP_NAMES
+        mcp_server_apps = ["mcp-erpnext", "mcp-linkedin", "mcp-reddit", "mcp-subconscious"]
+        for app in mcp_server_apps:
+            assert app in _DEFAULT_APP_NAMES, f"'{app}' missing from _DEFAULT_APP_NAMES"
+
+    def test_default_app_names_mcp_names_are_azure_safe(self) -> None:
+        """MCP server app names must not contain dots (Azure resource naming constraint)."""
+        from orchestrator.integration.sdk_bridge import _DEFAULT_APP_NAMES
+        mcp_server_apps = [a for a in _DEFAULT_APP_NAMES if a.startswith("mcp-")]
+        assert len(mcp_server_apps) == 4
+        for app in mcp_server_apps:
+            assert "." not in app, f"'{app}' contains a dot — invalid Azure resource name"
+
 
 # ====================================================================
 # KernelBridge — unit tests

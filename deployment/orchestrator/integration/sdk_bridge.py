@@ -35,6 +35,11 @@ _DEFAULT_APP_NAMES: list[str] = [
     "aos-client-sdk",
     "business-infinity",
     "aos-dispatcher",
+    # MCP server submodules from ASISaga/mcp
+    "mcp-erpnext",
+    "mcp-linkedin",
+    "mcp-reddit",
+    "mcp-subconscious",
 ]
 
 

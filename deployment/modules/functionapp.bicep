@@ -54,6 +54,9 @@ param githubOrg string
 @description('GitHub Actions environment name used as the OIDC subject bound to this app. Defaults to the deployment environment value.')
 param githubEnvironment string = environment
 
+@description('GitHub repository name for the OIDC Workload Identity Federation subject. Defaults to appName when the repo name matches the app name. Override when the GitHub repo name differs from appName (e.g. MCP servers whose repo names contain dots).')
+param githubRepo string = appName
+
 @description('Azure AI Foundry project discovery URL for Foundry Agent Service orchestration')
 param foundryProjectEndpoint string = ''
 
@@ -111,7 +114,7 @@ resource federatedCredential 'Microsoft.ManagedIdentity/userAssignedIdentities/f
   name: 'github-${appName}-${environment}'
   properties: {
     issuer: 'https://token.actions.githubusercontent.com'
-    subject: 'repo:${githubOrg}/${appName}:environment:${githubEnvironment}'
+    subject: 'repo:${githubOrg}/${githubRepo}:environment:${githubEnvironment}'
     audiences: [
       'api://AzureADTokenExchange'
     ]
