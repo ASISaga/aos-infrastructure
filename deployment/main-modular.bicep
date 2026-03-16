@@ -63,11 +63,6 @@ param budgetAlertEmails array = []
 
 @description('List of AOS application module names — one dedicated Flex Consumption plan and Function App is created per entry. These are the canonical AOS repository modules plus C-suite agents deployed to Azure; code-only repositories (purpose-driven-agent, leadership-agent) are not included as they are not deployed directly.')
 param appNames array = [
-  'ceo-agent'
-  'cfo-agent'
-  'cto-agent'
-  'cso-agent'
-  'cmo-agent'
   'aos-kernel'
   'aos-intelligence'
   'aos-realm-of-agents'
@@ -76,6 +71,28 @@ param appNames array = [
   'business-infinity'
   'aos-dispatcher'
 ]
+
+@description('List of C-suite agent app names that should be deployed to Foundry rather than as Function Apps')
+param foundryAppNames array = [
+  'ceo-agent'
+  'cfo-agent'
+  'cto-agent'
+  'cso-agent'
+  'cmo-agent'
+]
+
+@description('ARM template fragment deployed per foundry app to provision Agent Service resources')
+param agentTemplate object = {
+  "$schema": 'https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#'
+  contentVersion: '1.0.0.0'
+  resources: []
+}
+
+@description('Parameters for the `agentTemplate` (object mapping parameterName -> { value: ... })')
+param agentTemplateParameters object = {}
+
+@description('Enable nested deployment of the provided `agentTemplate` for each foundry app')
+param useAgentNestedDeployment bool = false
 
 @description('List of MCP server modules from the ASISaga/mcp repository and its submodules. Each entry specifies the Azure-safe app name and the actual GitHub repository name (which may contain dots) used for Workload Identity Federation.')
 param mcpServerApps array = [
@@ -216,6 +233,27 @@ module loraInference 'modules/lora-inference.bicep' = {
     aiServicesAccountId: aiServices.outputs.accountId
   }
 }
+
+// Create Foundry-hosted C-suite agent endpoints (one per foundryAppNames entry)
+module foundryApps 'modules/foundry-app.bicep' = [for fa in foundryAppNames: {
+  name: 'foundry-${fa}-${suffix}'
+  params: {
+    location: locationML
+    environment: environment
+    projectName: projectName
+    uniqueSuffix: uniqueSuffix
+    tags: tags
+    hubId: aiHub.outputs.hubId
+    aiServicesAccountId: aiServices.outputs.accountId
+    appName: fa
+    // Provide a model identifier registered in the Model Registry or replace with a real model id
+    modelId: 'azureml://registries/REPLACE_WITH_REGISTRY/models/REPLACE_MODEL/versions/1'
+    skuCapacity: 1
+    useNestedDeployment: useAgentNestedDeployment
+    agentTemplate: agentTemplate
+    agentTemplateParameters: agentTemplateParameters
+  }
+}]
 
 // AI Gateway (API Management)
 module aiGateway 'modules/ai-gateway.bicep' = {
@@ -362,6 +400,9 @@ output aiGatewayUrl string = aiGateway.outputs.gatewayUrl
 output modelRegistryName string = modelRegistry.outputs.registryName
 output loraInferenceEndpointName string = loraInference.outputs.endpointName
 output loraInferenceScoringUri string = loraInference.outputs.scoringUri
+// Foundry C-suite endpoints created by foundryApps module
+output foundryEndpointNames array = [for (fa, i) in foundryAppNames: foundryApps[i].outputs.endpointName]
+output foundryScoringUris array = [for (fa, i) in foundryAppNames: foundryApps[i].outputs.scoringUri]
 // Governance outputs
 output governancePoliciesEnabled bool = enableGovernancePolicies
 output budgetEnabled bool = monthlyBudgetAmount > 0
