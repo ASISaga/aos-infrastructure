@@ -26,3 +26,4 @@ local.settings.json
 # Deployment audit logs (generated at runtime)
 deployment/audit/
 
+error-message.txt
