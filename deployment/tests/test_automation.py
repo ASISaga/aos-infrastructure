@@ -502,6 +502,23 @@ class TestSDKBridge:
             # domain must be a valid-looking hostname (at least two dots for a subdomain)
             assert derived_domain.count(".") >= 2, f"Derived domain '{derived_domain}' has too few labels"
 
+    def test_foundry_app_names_are_csuite_agents(self) -> None:
+        """_FOUNDRY_APP_NAMES must list all five C-suite agents — mirrors foundryAppNames in main-modular.bicep."""
+        from orchestrator.integration.sdk_bridge import _FOUNDRY_APP_NAMES
+        expected = {"ceo-agent", "cfo-agent", "cto-agent", "cso-agent", "cmo-agent"}
+        assert set(_FOUNDRY_APP_NAMES) == expected, (
+            f"_FOUNDRY_APP_NAMES {_FOUNDRY_APP_NAMES} does not match expected C-suite agents {expected}"
+        )
+
+    def test_foundry_apps_not_in_default_app_names(self) -> None:
+        """C-suite agents are Foundry-hosted, not Function Apps — must not appear in _DEFAULT_APP_NAMES."""
+        from orchestrator.integration.sdk_bridge import _DEFAULT_APP_NAMES, _FOUNDRY_APP_NAMES
+        for agent in _FOUNDRY_APP_NAMES:
+            assert agent not in _DEFAULT_APP_NAMES, (
+                f"'{agent}' is in _DEFAULT_APP_NAMES but should be in _FOUNDRY_APP_NAMES only — "
+                "C-suite agents are Foundry Agent Service endpoints, not Function Apps"
+            )
+
 
 # ====================================================================
 # KernelBridge — unit tests
@@ -518,7 +535,10 @@ class TestKernelBridge:
         assert "aiProjectDiscoveryUrl" in _OUTPUT_TO_ENV_MAP
         assert "keyVaultName" in _OUTPUT_TO_ENV_MAP
         assert "serviceBusNamespace" in _OUTPUT_TO_ENV_MAP
-        assert "loraInferenceScoringUri" in _OUTPUT_TO_ENV_MAP
+        # loraInferenceScoringUri was renamed to the plural array output; the scalar
+        # key must NOT be in the map — per-agent LoRA outputs are handled separately.
+        assert "loraInferenceScoringUri" not in _OUTPUT_TO_ENV_MAP
+        assert "modelRegistryName" in _OUTPUT_TO_ENV_MAP
 
     def test_translate_outputs_standard(self, kb: KernelBridge) -> None:
         outputs = {
@@ -538,6 +558,37 @@ class TestKernelBridge:
     def test_translate_outputs_empty(self, kb: KernelBridge) -> None:
         env_vars = KernelBridge._translate_outputs({})
         assert env_vars == {}
+
+    def test_translate_outputs_lora_array(self, kb: KernelBridge) -> None:
+        """Per-agent LoRA array outputs are serialised as JSON strings."""
+        import json
+        outputs = {
+            "loraInferenceEndpointNames": {
+                "value": [
+                    "ep-ceo-agent-aos-prod-xyz",
+                    "ep-cfo-agent-aos-prod-xyz",
+                    "ep-cto-agent-aos-prod-xyz",
+                    "ep-cso-agent-aos-prod-xyz",
+                    "ep-cmo-agent-aos-prod-xyz",
+                ]
+            },
+            "loraInferenceScoringUris": {
+                "value": [
+                    "https://ep-ceo-agent-aos-prod-xyz.eastus2.inference.ml.azure.com/score",
+                    "https://ep-cfo-agent-aos-prod-xyz.eastus2.inference.ml.azure.com/score",
+                    "https://ep-cto-agent-aos-prod-xyz.eastus2.inference.ml.azure.com/score",
+                    "https://ep-cso-agent-aos-prod-xyz.eastus2.inference.ml.azure.com/score",
+                    "https://ep-cmo-agent-aos-prod-xyz.eastus2.inference.ml.azure.com/score",
+                ]
+            },
+        }
+        env_vars = KernelBridge._translate_outputs(outputs)
+        endpoint_names = json.loads(env_vars["LORA_INFERENCE_ENDPOINT_NAMES"])
+        scoring_uris = json.loads(env_vars["LORA_INFERENCE_SCORING_URIS"])
+        assert len(endpoint_names) == 5
+        assert "ep-ceo-agent-aos-prod-xyz" in endpoint_names
+        assert len(scoring_uris) == 5
+        assert all(u.startswith("https://ep-") and u.endswith("/score") for u in scoring_uris)
 
     def test_validate_kernel_config_all_present(self, kb: KernelBridge) -> None:
         env_vars = {

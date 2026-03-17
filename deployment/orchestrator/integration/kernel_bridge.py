@@ -31,7 +31,6 @@ _OUTPUT_TO_ENV_MAP: dict[str, str] = {
     "storageAccountName": "AOS_STORAGE_ACCOUNT",
     "aiHubName": "AZURE_ML_HUB_NAME",
     "aiProjectName": "AZURE_ML_PROJECT_NAME",
-    "loraInferenceScoringUri": "LORA_INFERENCE_SCORING_URI",
     "modelRegistryName": "LORA_MODEL_REGISTRY_NAME",
     "resourceGroupName": "AZURE_RESOURCE_GROUP",
 }
@@ -216,11 +215,30 @@ class KernelBridge:
 
     @staticmethod
     def _translate_outputs(outputs: dict[str, Any]) -> dict[str, str]:
-        """Translate Bicep output objects to env var strings."""
+        """Translate Bicep output objects to env var strings.
+
+        Scalar outputs are translated via :data:`_OUTPUT_TO_ENV_MAP`.
+        Array outputs (e.g. per-agent LoRA endpoint names and scoring URIs)
+        are serialised as JSON strings so that kernel consumers can decode
+        them with ``json.loads()``.
+        """
         env_vars: dict[str, str] = {}
         for bicep_key, env_key in _OUTPUT_TO_ENV_MAP.items():
             output = outputs.get(bicep_key, {})
             value = output.get("value")
             if value is not None:
                 env_vars[env_key] = str(value)
+
+        # Per-agent LoRA array outputs — serialised as JSON strings.
+        # loraInferenceEndpointNames and loraInferenceScoringUris are arrays
+        # (one entry per C-suite agent) produced by the loraInferences module loop.
+        for bicep_key, env_key in [
+            ("loraInferenceEndpointNames", "LORA_INFERENCE_ENDPOINT_NAMES"),
+            ("loraInferenceScoringUris", "LORA_INFERENCE_SCORING_URIS"),
+        ]:
+            output = outputs.get(bicep_key, {})
+            value = output.get("value")
+            if value is not None:
+                env_vars[env_key] = json.dumps(value) if isinstance(value, list) else str(value)
+
         return env_vars

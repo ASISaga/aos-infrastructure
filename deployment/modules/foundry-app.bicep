@@ -126,4 +126,4 @@ resource agentTemplateDeployment 'Microsoft.Resources/deployments@2021-04-01' = 
 }
 
 output agentTemplateDeploymentName string = useNestedDeployment ? '${appName}-agent-template' : ''
-output agentTemplateDeploymentOutputs object = useNestedDeployment ? (agentTemplateDeployment.properties.?outputs ?? {}) : {}
+output agentTemplateDeploymentOutputs object = useNestedDeployment ? (agentTemplateDeployment.properties.outputs ?? {}) : {}

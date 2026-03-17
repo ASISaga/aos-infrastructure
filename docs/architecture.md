@@ -34,39 +34,47 @@ main-modular.bicep                  # Entry point — composes all modules
 ├── modules/ai-hub.bicep            # Azure AI Foundry Hub (ML Workspace)
 ├── modules/ai-project.bicep        # Azure AI Foundry Project (ML Workspace)
 ├── modules/model-registry.bicep    # Model registry for LoRA adapter assets
-├── modules/lora-inference.bicep    # Llama-3.3-70B-Instruct managed endpoint
+├── modules/lora-inference.bicep    # Per-agent LoRA adapter endpoints (one per C-suite agent)
+├── modules/foundry-app.bicep       # Foundry Agent Service endpoint (one per C-suite agent)
 ├── modules/ai-gateway.bicep        # API Management (rate limiting + JWT)
 ├── modules/a2a-connections.bicep   # Agent-to-Agent connections (C-suite)
 ├── modules/functionapp.bicep       # FC1 Flex Consumption plan + Function App
-│                                   #   (one per app: 12 AOS modules + 4 MCP servers)
+│                                   #   (one per app: 7 AOS modules + 4 MCP servers)
 └── modules/functionapp-ssl.bicep   # SNI TLS re-binding sub-module (Phase 3)
 ```
 
 ## Custom Domain and DNS Architecture
 
-Every Function App is bound to a `*.asisaga.com` custom hostname secured by a free
-App Service Managed Certificate.  The binding follows a three-phase sequence per app:
+Function Apps (AOS modules and MCP servers) are bound to `*.asisaga.com` custom hostnames
+secured by a free App Service Managed Certificate.  The binding follows a three-phase
+sequence per app:
 
 ```
 DNS provider            Azure App Service
 ─────────────────────   ─────────────────────────────────────────────
 CNAME record pre-created
-  ceo-agent.asisaga.com
-  → func-ceo-agent-        Phase 1 — hostnameBinding (sslState: Disabled)
+  aos-dispatcher.asisaga.com
+  → func-aos-dispatcher-  Phase 1 — hostnameBinding (sslState: Disabled)
     prod-<suffix>.          ↓
     azurewebsites.net      Phase 2 — managedCertificate (free, auto-renewing)
                             ↓
                            Phase 3 — sslBinding (SniEnabled + thumbprint)
                             ↓
-                           https://ceo-agent.asisaga.com  ✅
+                           https://aos-dispatcher.asisaga.com  ✅
 ```
+
+C-suite agents (`ceo-agent`, `cfo-agent`, `cto-agent`, `cso-agent`, `cmo-agent`) are hosted
+as **Foundry Agent Service** endpoints (not Function Apps).  Each gets a dedicated
+per-agent LoRA inference endpoint provisioned by `lora-inference.bicep` (one instance
+per agent) and connected to the corresponding `foundry-app.bicep` deployment.
 
 **Domain derivation rules:**
 
-| App category | Custom domain formula | Example |
-|-------------|----------------------|---------|
-| Standard AOS modules (12) | `<appName>.asisaga.com` | `aos-dispatcher.asisaga.com` |
-| MCP servers (4) | `githubRepo` value (IS the full domain) | `erpnext.asisaga.com` |
+| App category | Deployment target | Custom domain formula | Example |
+|-------------|------------------|----------------------|---------|
+| AOS modules (7) | Azure Function App | `<appName>.asisaga.com` | `aos-dispatcher.asisaga.com` |
+| MCP servers (4) | Azure Function App | `githubRepo` value (IS the full domain) | `erpnext.asisaga.com` |
+| C-suite agents (5) | Foundry Agent Service | `<appName>.asisaga.com` (Foundry endpoint) | `ceo-agent.asisaga.com` |
 
 **All 16 production custom domains:**
 
