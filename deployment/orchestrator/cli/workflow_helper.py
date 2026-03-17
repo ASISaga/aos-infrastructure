@@ -10,7 +10,8 @@ Provides subcommands consumed by the ``infrastructure-deploy.yml`` workflow:
   environment and geography.
 * **analyze-output** — classify the orchestrator's exit code and log output
   as *success*, *transient failure*, or *logic error*.
-* **retry** — re-run the deployment up to ``--max-retries`` times.
+* **retry** — re-run the deployment up to ``--max-retries`` times with
+  exponential back-off between attempts.
 * **extract-summary** — read audit JSON files and emit a GitHub Actions
   summary.
 """
@@ -22,7 +23,7 @@ import json
 import os
 import re
 import subprocess
-import sys
+import time
 from pathlib import Path
 
 
@@ -34,7 +35,7 @@ def _output(key: str, value: str) -> None:
     """Write a key=value pair to ``$GITHUB_OUTPUT`` (or stdout as fallback)."""
     gh_output = os.environ.get("GITHUB_OUTPUT")
     if gh_output:
-        with open(gh_output, "a") as fh:
+        with open(gh_output, "a", encoding="utf-8") as fh:
             fh.write(f"{key}={value}\n")
     print(f"  {key}={value}")
 
@@ -42,6 +43,29 @@ def _output(key: str, value: str) -> None:
 # ------------------------------------------------------------------
 # Subcommand implementations
 # ------------------------------------------------------------------
+
+def _check_pr_labels(env: str) -> tuple[bool, bool, str]:
+    """Evaluate PR labels and return (should_deploy, is_dry_run, environment).
+
+    Returns:
+        A tuple of (should_deploy, is_dry_run, resolved_environment) where
+        ``should_deploy`` is True when a matching label is present,
+        ``is_dry_run`` is True only for the ``deploy:dev`` label, and
+        ``resolved_environment`` is the environment derived from the label.
+    """
+    deploy_dev = os.environ.get("PR_LABEL_DEPLOY_DEV", "false") == "true"
+    deploy_staging = os.environ.get("PR_LABEL_DEPLOY_STAGING", "false") == "true"
+    action_deploy = os.environ.get("PR_LABEL_ACTION_DEPLOY", "false") == "true"
+    approved = os.environ.get("PR_LABEL_STATUS_APPROVED", "false") == "true"
+
+    if deploy_dev:
+        return True, True, "dev"
+    if deploy_staging and approved:
+        return True, False, "staging"
+    if action_deploy:
+        return True, False, env
+    return False, False, env
+
 
 def _check_trigger(_args: argparse.Namespace) -> None:
     """Determine whether a deployment should be triggered."""
@@ -59,20 +83,7 @@ def _check_trigger(_args: argparse.Namespace) -> None:
     if event == "workflow_dispatch":
         should_deploy = True
     elif event == "pull_request":
-        deploy_dev = os.environ.get("PR_LABEL_DEPLOY_DEV", "false") == "true"
-        deploy_staging = os.environ.get("PR_LABEL_DEPLOY_STAGING", "false") == "true"
-        action_deploy = os.environ.get("PR_LABEL_ACTION_DEPLOY", "false") == "true"
-        approved = os.environ.get("PR_LABEL_STATUS_APPROVED", "false") == "true"
-
-        if deploy_dev:
-            env = "dev"
-            is_dry_run = True
-            should_deploy = True
-        elif deploy_staging and approved:
-            env = "staging"
-            should_deploy = True
-        elif action_deploy:
-            should_deploy = True
+        should_deploy, is_dry_run, env = _check_pr_labels(env)
     elif event == "issue_comment":
         body = os.environ.get("COMMENT_BODY", "")
         if "/deploy" in body:
@@ -152,7 +163,7 @@ def _analyze_output(args: argparse.Namespace) -> None:
 
     log_text = ""
     if log_file and Path(log_file).exists():
-        log_text = Path(log_file).read_text()
+        log_text = Path(log_file).read_text(encoding="utf-8")
 
     if exit_code == 0:
         _output("status", "success")
@@ -173,15 +184,18 @@ def _analyze_output(args: argparse.Namespace) -> None:
     error_file = "error-message.txt"
     error_lines = [ln for ln in log_text.splitlines() if "error" in ln.lower()]
     error_text = "\n".join(error_lines[-50:]) if error_lines else log_text[-2000:]
-    Path(error_file).write_text(error_text[:4096])
+    Path(error_file).write_text(error_text[:4096], encoding="utf-8")
     _output("error_file", error_file)
 
 
 _SHA_RE = re.compile(r"^[a-fA-F0-9]{7,40}$")
 
+# Base delay (seconds) for exponential back-off between retry attempts.
+_RETRY_BASE_DELAY: float = 10.0
+
 
 def _retry(args: argparse.Namespace) -> None:
-    """Retry the deployment up to ``--max-retries`` times."""
+    """Retry the deployment up to ``--max-retries`` times with exponential back-off."""
     max_retries = int(getattr(args, "max_retries", 3))
     deploy_args = [
         "python3", "deployment/deploy.py", "deploy",
@@ -200,8 +214,12 @@ def _retry(args: argparse.Namespace) -> None:
         deploy_args += ["--git-sha", git_sha]
 
     for attempt in range(1, max_retries + 1):
+        if attempt > 1:
+            delay = _RETRY_BASE_DELAY * (2 ** (attempt - 2))
+            print(f"  Waiting {delay:.0f}s before next attempt…")
+            time.sleep(delay)
         print(f"\n🔄 Retry attempt {attempt}/{max_retries}")
-        result = subprocess.run(deploy_args, capture_output=True, text=True)
+        result = subprocess.run(deploy_args, capture_output=True, text=True, check=False)
         if result.stdout:
             print(result.stdout)
         if result.returncode == 0:
@@ -255,7 +273,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_analyze.add_argument("--log-file", default="")
     p_analyze.add_argument("--exit-code", default="0")
 
-    p_retry = sub.add_parser("retry", help="Retry deployment")
+    p_retry = sub.add_parser("retry", help="Retry deployment with exponential back-off")
     p_retry.add_argument("--resource-group", required=True)
     p_retry.add_argument("--location", required=True)
     p_retry.add_argument("--location-ml", default="")
