@@ -19,9 +19,15 @@ param startDate string = ''
 @description('End date for the budget (YYYY-MM-DD). Defaults to last day of current year.')
 param endDate string = ''
 
+@description('Current UTC year used to compute default start/end dates (do not override).')
+param currentYear string = utcNow('yyyy')
+
+@description('Current UTC month used to compute default start date (do not override).')
+param currentMonth string = utcNow('MM')
+
 // ── Resolve default dates ────────────────────────────────────────────────────
-var resolvedStartDate = empty(startDate) ? '${string(utcNow('yyyy'))}-${string(utcNow('MM'))}-01' : startDate
-var resolvedEndDate   = empty(endDate)   ? '${string(utcNow('yyyy'))}-12-31' : endDate
+var resolvedStartDate = empty(startDate) ? '${currentYear}-${currentMonth}-01' : startDate
+var resolvedEndDate   = empty(endDate)   ? '${currentYear}-12-31' : endDate
 
 // ── Budget name ──────────────────────────────────────────────────────────────
 var budgetName = 'aos-budget-${environment}'

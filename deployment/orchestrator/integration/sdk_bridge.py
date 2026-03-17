@@ -23,11 +23,12 @@ from typing import Any, Optional
 logger = logging.getLogger(__name__)
 
 
-# AOS application module names — mirrors the canonical list in main-modular.bicep
+# AOS application module names deployed as Function Apps — mirrors the `appNames` array in
+# main-modular.bicep.  Code-only base classes (purpose-driven-agent, leadership-agent) and
+# C-suite agents (ceo/cfo/cto/cso/cmo) are NOT included here because they are not deployed
+# as Function Apps; the latter are hosted as Foundry Agent Service endpoints (see
+# _FOUNDRY_APP_NAMES below).
 _DEFAULT_APP_NAMES: list[str] = [
-    "purpose-driven-agent",
-    "leadership-agent",
-    "cmo-agent",
     "aos-kernel",
     "aos-intelligence",
     "aos-realm-of-agents",
@@ -40,6 +41,17 @@ _DEFAULT_APP_NAMES: list[str] = [
     "mcp-linkedin",
     "mcp-reddit",
     "mcp-subconscious",
+]
+
+# C-suite agents hosted as Foundry Agent Service endpoints — mirrors `foundryAppNames` in
+# main-modular.bicep.  These agents are NOT Function Apps; they are provisioned via
+# foundry-app.bicep with dedicated per-agent LoRA inference endpoints.
+_FOUNDRY_APP_NAMES: list[str] = [
+    "ceo-agent",
+    "cfo-agent",
+    "cto-agent",
+    "cso-agent",
+    "cmo-agent",
 ]
 
 # Base domain for standard AOS app custom hostnames — mirrors the baseDomain default in main-modular.bicep.

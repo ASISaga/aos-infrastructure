@@ -13,7 +13,7 @@ param useNestedDeployment bool = false
 
 @description('ARM template fragment for Agent Service / Foundry agents. When empty, a no-op template is used.')
 param agentTemplate object = {
-  "$schema": 'https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#'
+  '$schema': 'https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#'
   contentVersion: '1.0.0.0'
   resources: []
 }
@@ -38,6 +38,9 @@ param aiServicesAccountId string
 
 @description('Application logical name (used to derive endpoint name)')
 param appName string
+
+@description('Name of the LoRA inference endpoint provisioned for this agent (used to connect the Foundry Agent Service to its dedicated LoRA adapter deployment)')
+param loraInferenceEndpointName string
 
 @description('Model identifier (azureml://registries/... or other registry id)')
 param modelId string
@@ -95,6 +98,7 @@ resource agentDeployment 'Microsoft.MachineLearningServices/workspaces/onlineEnd
     }
     properties: {
       aiServicesAccountId: aiServicesAccountId
+      loraInferenceEndpointName: loraInferenceEndpointName
     }
   }
   dependsOn: [
@@ -112,7 +116,7 @@ output scoringUri string = endpoint.properties.scoringUri
 output endpointId string = endpoint.id
 
 // Nested deployment for Agent Service resources (user-supplied template)
-resource agentTemplateDeployment 'Microsoft.Resources/deployments@2021-04-01' = {
+resource agentTemplateDeployment 'Microsoft.Resources/deployments@2021-04-01' = if (useNestedDeployment) {
   name: '${appName}-agent-template'
   properties: {
     mode: 'Incremental'
@@ -121,5 +125,5 @@ resource agentTemplateDeployment 'Microsoft.Resources/deployments@2021-04-01' = 
   }
 }
 
-output agentTemplateDeploymentName string = agentTemplateDeployment.name
-output agentTemplateDeploymentOutputs object = agentTemplateDeployment.properties.outputs
+output agentTemplateDeploymentName string = useNestedDeployment ? '${appName}-agent-template' : ''
+output agentTemplateDeploymentOutputs object = useNestedDeployment ? (agentTemplateDeployment.properties.outputs ?? {}) : {}

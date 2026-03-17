@@ -1,8 +1,10 @@
 // LoRA Inference module — Llama-3.3-70B-Instruct Managed Online Endpoint with Multi-LoRA support
 //
-// Deploys the base model as a Managed Online Endpoint on Azure AI Services.
-// Multi-LoRA is enabled via deployment metadata so that LoRA adapters stored in
-// the Model Registry can be injected at inference time without reloading weights.
+// Deploys a per-agent LoRA-enabled endpoint backed by the Llama-3.3-70B-Instruct base model.
+// One instance of this module is provisioned per C-suite agent (ceo-agent, cfo-agent, etc.)
+// so that each agent endpoint carries its own LoRA adapter at inference time without
+// reloading base weights from disk between requests (Provisioned Throughput keeps weights
+// resident in VRAM).
 
 @description('Azure region')
 param location string
@@ -26,12 +28,15 @@ param hubId string
 @description('AI Services account resource ID (compute backbone)')
 param aiServicesAccountId string
 
+@description('Agent application name for per-agent LoRA adapter deployment (e.g. ceo-agent). Each C-suite agent gets its own LoRA-enabled endpoint backed by the shared Llama base model.')
+param appName string
+
 // ====================================================================
 // Variables
 // ====================================================================
 
-var endpointName = 'ep-llama-${projectName}-${environment}-${take(uniqueSuffix, 6)}'
-var deploymentName = 'llama-33-70b-instruct'
+var endpointName = 'ep-${appName}-${projectName}-${environment}-${take(uniqueSuffix, 6)}'
+var deploymentName = '${appName}-lora'
 var baseModelId = 'azureml://registries/azureml-meta/models/Meta-Llama-3.3-70B-Instruct/versions/1'
 
 // ====================================================================
@@ -47,7 +52,7 @@ resource llamaEndpoint 'Microsoft.MachineLearningServices/workspaces/onlineEndpo
     type: 'SystemAssigned'
   }
   properties: {
-    description: 'Llama-3.3-70B-Instruct Multi-LoRA inference endpoint (${environment})'
+    description: 'Llama-3.3-70B-Instruct Multi-LoRA inference endpoint for ${appName} (${environment})'
     authMode: 'Key'
     publicNetworkAccess: environment == 'prod' ? 'Disabled' : 'Enabled'
   }
@@ -69,7 +74,7 @@ resource llamaDeployment 'Microsoft.MachineLearningServices/workspaces/onlineEnd
   properties: {
     endpointComputeType: 'Managed'
     model: baseModelId
-    description: 'meta-llama/Llama-3.3-70B-Instruct — Multi-LoRA base deployment'
+    description: 'meta-llama/Llama-3.3-70B-Instruct — Multi-LoRA adapter deployment for ${appName}'
     scaleSettings: {
       scaleType: 'Default'
     }
@@ -82,6 +87,7 @@ resource llamaDeployment 'Microsoft.MachineLearningServices/workspaces/onlineEnd
       multiLora: 'enabled'
       baseModelId: baseModelId
       aiServicesAccountId: aiServicesAccountId
+      adapterName: '${appName}-lora-adapter'
     }
   }
   dependsOn: [
@@ -95,4 +101,5 @@ resource llamaDeployment 'Microsoft.MachineLearningServices/workspaces/onlineEnd
 
 output endpointName string = endpointName
 output deploymentName string = deploymentName
+output endpointId string = llamaEndpoint.id
 output scoringUri string = llamaEndpoint.properties.scoringUri
