@@ -80,12 +80,26 @@ class PipelineManager:
         return ok
 
     def what_if(self) -> bool:
-        """Stage 3 — Preview changes with ``az deployment group what-if``."""
+        """Stage 3 — Preview changes with ``az deployment group what-if``.
+
+        Azure CLI 2.57+ returns exit code 2 when changes are detected and
+        exit code 0 when no changes are detected.  Both are success outcomes;
+        only exit code 1 (or any other non-zero, non-2 value) indicates a
+        genuine error.
+        """
         result = self._run(self._deployment_cmd("what-if"))
-        ok = result.returncode == 0
-        if not ok:
-            print(f"  What-If failed: {result.stderr.strip()}", file=sys.stderr)
-        return ok
+        if result.returncode == 0:
+            return True
+        if result.returncode == 2:
+            # Exit code 2 means "changes detected" — not an error.
+            print("  ⚠️  What-If: changes detected (resources will be created/modified/deleted)")
+            if result.stdout:
+                print(result.stdout)
+            return True
+        # Any other non-zero exit code is a genuine failure.
+        error_detail = (result.stderr or result.stdout or "no details available").strip()
+        print(f"  What-If failed: {error_detail}", file=sys.stderr)
+        return False
 
     def deploy(self) -> bool:
         """Stage 4 — Apply changes with ``az deployment group create``."""

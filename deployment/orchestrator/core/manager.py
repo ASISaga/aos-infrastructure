@@ -459,19 +459,42 @@ class InfrastructureManager:
             print("  No template specified; skipping lint.")
             return True
         result = self._run(["az", "bicep", "build", "--file", self.config.template])
+        if result.returncode != 0:
+            error_detail = (result.stderr or result.stdout or "no details available").strip()
+            print(f"  Lint error: {error_detail}", file=sys.stderr)
         return result.returncode == 0
 
     def _validate(self) -> bool:
         """Run ``az deployment group validate``."""
         cmd = self._deployment_cmd("validate")
         result = self._run(cmd)
+        if result.returncode != 0:
+            error_detail = (result.stderr or result.stdout or "no details available").strip()
+            print(f"  Validate error: {error_detail}", file=sys.stderr)
         return result.returncode == 0
 
     def _what_if(self) -> bool:
-        """Run ``az deployment group what-if``."""
+        """Run ``az deployment group what-if``.
+
+        Azure CLI 2.57+ returns exit code 2 when changes are detected and
+        exit code 0 when no changes are detected.  Both are success outcomes;
+        only exit code 1 (or any other non-zero, non-2 value) indicates a
+        genuine error.
+        """
         cmd = self._deployment_cmd("what-if")
         result = self._run(cmd)
-        return result.returncode == 0
+        if result.returncode == 0:
+            return True
+        if result.returncode == 2:
+            # Exit code 2 means "changes detected" — not an error.
+            print("  ⚠️  What-If: changes detected (resources will be created/modified/deleted)")
+            if result.stdout:
+                print(result.stdout)
+            return True
+        # Any other non-zero exit code is a genuine failure; surface the detail.
+        error_detail = (result.stderr or result.stdout or "no details available").strip()
+        print(f"  What-If error: {error_detail}", file=sys.stderr)
+        return False
 
     def _deploy(self) -> bool:
         """Run ``az deployment group create``."""

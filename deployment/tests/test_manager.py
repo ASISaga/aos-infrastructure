@@ -140,6 +140,39 @@ class TestInfrastructureManager:
         assert mock_run.call_count == 3
 
     @mock.patch.object(InfrastructureManager, "_run")
+    def test_what_if_exit_code_2_is_success(self, mock_run: mock.Mock, manager: InfrastructureManager) -> None:
+        # Azure CLI 2.57+ returns exit code 2 when changes are detected — treat as success.
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=2, stdout="+ Create resource", stderr="",
+        )
+        assert manager._what_if() is True
+
+    @mock.patch.object(InfrastructureManager, "_run")
+    def test_what_if_genuine_failure_returns_false(self, mock_run: mock.Mock, manager: InfrastructureManager) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr="ResourceGroupNotFound",
+        )
+        assert manager._what_if() is False
+
+    @mock.patch.object(InfrastructureManager, "_run")
+    def test_deploy_whatif_exit_code_2_does_not_abort(
+        self, mock_run: mock.Mock, manager: InfrastructureManager
+    ) -> None:
+        # Simulate: lint=0, validate=0, what-if=2 (changes detected), deploy=0, health=json
+        results = [
+            subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),  # lint
+            subprocess.CompletedProcess(args=[], returncode=0, stdout="{}", stderr=""),  # validate
+            subprocess.CompletedProcess(args=[], returncode=2, stdout="+ Create", stderr=""),  # what-if
+            subprocess.CompletedProcess(args=[], returncode=0, stdout="{}", stderr=""),  # deploy
+        ]
+        mock_run.side_effect = results
+        with mock.patch.object(
+            manager, "_az", return_value=json.dumps([{"name": "r", "state": "Succeeded"}])
+        ):
+            result = manager.deploy()
+        assert result is True
+
+    @mock.patch.object(InfrastructureManager, "_run")
     def test_deploy_calls_all_steps(self, mock_run: mock.Mock, manager: InfrastructureManager) -> None:
         mock_run.return_value = subprocess.CompletedProcess(
             args=[], returncode=0, stdout=json.dumps([{"name": "r", "state": "Succeeded"}]), stderr="",

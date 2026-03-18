@@ -170,6 +170,17 @@ class TestPipelineManager:
         assert pm.what_if() is True
 
     @mock.patch.object(PipelineManager, "_run")
+    def test_what_if_changes_detected_exit_code_2(self, mock_run: mock.Mock, pm: PipelineManager) -> None:
+        # Azure CLI 2.57+ returns exit code 2 when changes are detected — treat as success.
+        mock_run.return_value = subprocess.CompletedProcess([], 2, "~ Modify resource", "")
+        assert pm.what_if() is True
+
+    @mock.patch.object(PipelineManager, "_run")
+    def test_what_if_genuine_failure(self, mock_run: mock.Mock, pm: PipelineManager) -> None:
+        mock_run.return_value = subprocess.CompletedProcess([], 1, "", "ResourceGroupNotFound")
+        assert pm.what_if() is False
+
+    @mock.patch.object(PipelineManager, "_run")
     def test_deploy_success(self, mock_run: mock.Mock, pm: PipelineManager) -> None:
         mock_run.return_value = subprocess.CompletedProcess([], 0, "{}", "")
         assert pm.deploy() is True
