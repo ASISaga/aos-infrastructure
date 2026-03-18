@@ -603,7 +603,7 @@ class InfrastructureManager:
         if self.config.location_ml:
             overrides.append(f"locationML={self.config.location_ml}")
         if self.config.git_sha and self._SHA_RE.match(self.config.git_sha):
-            overrides.append(f"tags={{gitSha:'{self.config.git_sha}'}}")
+            overrides.append(f'tags={{"gitSha":"{self.config.git_sha}"}}')
         if overrides:
             cmd += ["--parameters"] + overrides
         return cmd
