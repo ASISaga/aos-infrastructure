@@ -136,8 +136,8 @@ class TestInfrastructureManager:
         mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
         result = manager.plan()
         assert result is True
-        # lint + validate + what-if = 3 calls
-        assert mock_run.call_count == 3
+        # ensure_resource_group + lint + validate + what-if = 4 calls
+        assert mock_run.call_count == 4
 
     @mock.patch.object(InfrastructureManager, "_run")
     def test_what_if_exit_code_2_is_success(self, mock_run: mock.Mock, manager: InfrastructureManager) -> None:
@@ -158,9 +158,10 @@ class TestInfrastructureManager:
     def test_deploy_whatif_exit_code_2_does_not_abort(
         self, mock_run: mock.Mock, manager: InfrastructureManager
     ) -> None:
-        # Simulate: lint=0, validate=0, what-if=2 (changes detected), deploy=0, health=json
+        # Simulate: rg_create=0, lint=0, validate=0, what-if=2 (changes detected), deploy=0
         results = [
-            subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),  # lint
+            subprocess.CompletedProcess(args=[], returncode=0, stdout="{}", stderr=""),  # ensure_resource_group
+            subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),    # lint
             subprocess.CompletedProcess(args=[], returncode=0, stdout="{}", stderr=""),  # validate
             subprocess.CompletedProcess(args=[], returncode=2, stdout="+ Create", stderr=""),  # what-if
             subprocess.CompletedProcess(args=[], returncode=0, stdout="{}", stderr=""),  # deploy
@@ -193,3 +194,47 @@ class TestInfrastructureManager:
         mock_az.return_value = json.dumps([])
         result = manager.status()
         assert result is True
+
+    @mock.patch.object(InfrastructureManager, "_run")
+    def test_ensure_resource_group_succeeds(self, mock_run: mock.Mock, manager: InfrastructureManager) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout='{"id": "/rg/rg-test", "properties": {"provisioningState": "Succeeded"}}',
+            stderr="",
+        )
+        assert manager._ensure_resource_group() is True
+        cmd = mock_run.call_args[0][0]
+        assert "az" in cmd and "group" in cmd and "create" in cmd
+        assert "rg-test" in cmd
+        assert "eastus" in cmd
+
+    @mock.patch.object(InfrastructureManager, "_run")
+    def test_ensure_resource_group_failure_returns_false(
+        self, mock_run: mock.Mock, manager: InfrastructureManager
+    ) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr="AuthorizationFailed",
+        )
+        assert manager._ensure_resource_group() is False
+
+    @mock.patch.object(InfrastructureManager, "_run")
+    def test_plan_aborts_when_resource_group_creation_fails(
+        self, mock_run: mock.Mock, manager: InfrastructureManager
+    ) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr="AuthorizationFailed",
+        )
+        result = manager.plan()
+        assert result is False
+        # Only the resource group creation call was made; lint/validate/what-if were not reached.
+        assert mock_run.call_count == 1
+
+    @mock.patch.object(InfrastructureManager, "_run")
+    def test_deploy_aborts_when_resource_group_creation_fails(
+        self, mock_run: mock.Mock, manager: InfrastructureManager
+    ) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr="AuthorizationFailed",
+        )
+        result = manager.deploy()
+        assert result is False
+        assert mock_run.call_count == 1
