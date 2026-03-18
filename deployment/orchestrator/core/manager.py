@@ -64,6 +64,7 @@ class InfrastructureManager:
               f"({self.config.environment}) in {self.config.location}")
 
         steps = [
+            ("Resource Group", self._ensure_resource_group),
             ("Lint", self._lint),
             ("Validate", self._validate),
             ("What-If", self._what_if),
@@ -124,12 +125,22 @@ class InfrastructureManager:
         print(f"📋 Running plan for {self.config.resource_group} "
               f"({self.config.environment}) in {self.config.location}")
 
-        for label, fn in [("Lint", self._lint), ("Validate", self._validate), ("What-If", self._what_if)]:
+        for label, fn in [
+            ("Resource Group", self._ensure_resource_group),
+            ("Lint", self._lint),
+            ("Validate", self._validate),
+            ("What-If", self._what_if),
+        ]:
             print(f"\n--- {label} ---")
             ok = fn()
-            if not ok and not self.config.allow_warnings:
-                print(f"❌ {label} failed")
-                return False
+            if not ok:
+                # Resource group creation is always required; other steps may
+                # be treated as warnings when --allow-warnings is set.
+                if label != "Resource Group" and self.config.allow_warnings:
+                    print(f"⚠️  {label} had warnings — continuing (--allow-warnings)")
+                else:
+                    print(f"❌ {label} failed")
+                    return False
             print(f"✅ {label} passed")
 
         self._audit("plan", {"status": "success"})
@@ -452,6 +463,35 @@ class InfrastructureManager:
     # ------------------------------------------------------------------
     # Private helpers — deployment pipeline
     # ------------------------------------------------------------------
+
+    def _ensure_resource_group(self) -> bool:
+        """Create the resource group if it does not already exist.
+
+        ``az deployment group`` commands (validate, what-if, create) all require
+        the target resource group to exist before they can run.  ``az group
+        create`` is idempotent — when the group already exists it returns the
+        existing group unchanged without modifying its location.
+
+        Returns:
+            True if the resource group exists or was created successfully,
+            False if creation failed (e.g. insufficient permissions).
+        """
+        print(f"  📦 Ensuring resource group '{self.config.resource_group}' "
+              f"in '{self.config.location}'…")
+        result = self._run([
+            "az", "group", "create",
+            "--name", self.config.resource_group,
+            "--location", self.config.location,
+            "--output", "json",
+        ])
+        if result.returncode != 0:
+            print(
+                f"  ❌ Could not ensure resource group '{self.config.resource_group}': "
+                f"{result.stderr.strip()}",
+                file=sys.stderr,
+            )
+            return False
+        return True
 
     def _lint(self) -> bool:
         """Run ``az bicep build`` to lint the template."""
