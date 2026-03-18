@@ -199,7 +199,7 @@ class PipelineManager:
         if self.location_ml:
             overrides.append(f"locationML={self.location_ml}")
         if self.git_sha and _SHA_RE.match(self.git_sha):
-            overrides.append(f"tags={{gitSha:'{self.git_sha}'}}")
+            overrides.append(f'tags={{"gitSha":"{self.git_sha}"}}')
         cmd += ["--parameters"] + overrides
         return cmd
 
