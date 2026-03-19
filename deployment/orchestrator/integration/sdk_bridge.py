@@ -24,18 +24,16 @@ logger = logging.getLogger(__name__)
 
 
 # AOS application module names deployed as Function Apps — mirrors the `appNames` array in
-# main-modular.bicep.  Code-only base classes (purpose-driven-agent, leadership-agent) and
-# C-suite agents (ceo/cfo/cto/cso/cmo) are NOT included here because they are not deployed
-# as Function Apps; the latter are hosted as Foundry Agent Service endpoints (see
-# _FOUNDRY_APP_NAMES below).
+# main-modular.bicep.
+# Code-only libraries that are imported at runtime (NOT Function Apps):
+#   aos-kernel, aos-intelligence, aos-client-sdk, aos-dispatcher — these are Python packages
+#   consumed by agent-operating-system; they have no Azure infrastructure of their own.
+# C-suite agents (ceo/cfo/cto/cso/cmo) are also excluded — they are Foundry Agent Service
+# endpoints (see _FOUNDRY_APP_NAMES below).
 _DEFAULT_APP_NAMES: list[str] = [
-    "aos-kernel",
-    "aos-intelligence",
+    "agent-operating-system",
     "aos-realm-of-agents",
-    "aos-mcp-servers",
-    "aos-client-sdk",
     "business-infinity",
-    "aos-dispatcher",
     # MCP server submodules from ASISaga/mcp
     "mcp-erpnext",
     "mcp-linkedin",
@@ -195,17 +193,17 @@ class SDKBridge:
         return results
 
     def get_aos_endpoint(self) -> Optional[str]:
-        """Discover the AOS dispatcher endpoint from the live resource group.
+        """Discover the AOS Function App endpoint from the live resource group.
 
-        Queries the ``aos-dispatcher`` Function App by its naming prefix
-        (``func-aos-dispatcher-{environment}-*``) because the full name includes
+        Queries the ``agent-operating-system`` Function App by its naming prefix
+        (``func-agent-operating-system-{environment}-*``) because the full name includes
         a unique suffix derived from the resource group ID at deploy time.
         """
         result = subprocess.run(  # noqa: S603
             [
                 "az", "functionapp", "list",
                 "--resource-group", self.resource_group,
-                "--query", f"[?starts_with(name, 'func-aos-dispatcher-{self.environment}-')].defaultHostName | [0]",
+                "--query", f"[?starts_with(name, 'func-agent-operating-system-{self.environment}-')].defaultHostName | [0]",
                 "--output", "tsv",
             ],
             capture_output=True, text=True,

@@ -486,22 +486,46 @@ class TestSDKBridge:
     @mock.patch("subprocess.run")
     def test_get_aos_endpoint(self, mock_run: mock.Mock, bridge: SDKBridge) -> None:
         mock_run.return_value = subprocess.CompletedProcess(
-            [], 0, "func-aos-dispatcher-dev-abc123.azurewebsites.net\n", ""
+            [], 0, "func-agent-operating-system-dev-abc123.azurewebsites.net\n", ""
         )
         endpoint = bridge.get_aos_endpoint()
-        assert endpoint == "https://func-aos-dispatcher-dev-abc123.azurewebsites.net"
+        assert endpoint == "https://func-agent-operating-system-dev-abc123.azurewebsites.net"
         # Verify the command uses `functionapp list` with a prefix filter (not `functionapp show`
         # with an exact name) because the real name includes a unique suffix.
         cmd = mock_run.call_args[0][0]
         assert "list" in cmd
         assert "starts_with" in " ".join(cmd)
-        assert "func-aos-dispatcher-dev-" in " ".join(cmd)
+        assert "func-agent-operating-system-dev-" in " ".join(cmd)
 
     def test_default_app_names_includes_mcp_servers(self) -> None:
         """All four MCP server submodules must be present in the default app names list."""
         from orchestrator.integration.sdk_bridge import _DEFAULT_APP_NAMES, _MCP_SERVER_APPS
         for app in _MCP_SERVER_APPS:
             assert app in _DEFAULT_APP_NAMES, f"'{app}' missing from _DEFAULT_APP_NAMES"
+
+    def test_default_app_names_includes_agent_operating_system(self) -> None:
+        """agent-operating-system is the single AOS Function App and must appear in _DEFAULT_APP_NAMES."""
+        from orchestrator.integration.sdk_bridge import _DEFAULT_APP_NAMES
+        assert "agent-operating-system" in _DEFAULT_APP_NAMES, (
+            "'agent-operating-system' missing from _DEFAULT_APP_NAMES — "
+            "it is the deployable Azure Function App that utilizes aos-kernel, "
+            "aos-intelligence, aos-client-sdk, and aos-dispatcher as libraries"
+        )
+
+    def test_code_only_repos_not_in_default_app_names(self) -> None:
+        """Code-only library repos must NOT appear as Function Apps in _DEFAULT_APP_NAMES.
+
+        aos-kernel, aos-intelligence, aos-client-sdk, and aos-dispatcher are Python
+        packages imported by agent-operating-system at runtime — they have no Azure
+        infrastructure of their own.
+        """
+        from orchestrator.integration.sdk_bridge import _DEFAULT_APP_NAMES
+        code_only_repos = ["aos-kernel", "aos-intelligence", "aos-client-sdk", "aos-dispatcher"]
+        for repo in code_only_repos:
+            assert repo not in _DEFAULT_APP_NAMES, (
+                f"'{repo}' is a code-only library repo and must not appear in _DEFAULT_APP_NAMES — "
+                "it is consumed by agent-operating-system, not deployed as a standalone Function App"
+            )
 
     def test_default_app_names_mcp_names_are_azure_safe(self) -> None:
         """MCP server app names must not contain dots (Azure resource naming constraint)."""

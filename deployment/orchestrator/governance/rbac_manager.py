@@ -15,7 +15,7 @@ from typing import Any
 
 # AOS standard role mappings: principal type → minimum required role
 _AOS_REQUIRED_ROLES: dict[str, str] = {
-    "aos-dispatcher": "Contributor",
+    "agent-operating-system": "Contributor",
     "aos-realm-of-agents": "Contributor",
     "aos-mcp-servers": "Reader",
     "aos-infrastructure": "Owner",

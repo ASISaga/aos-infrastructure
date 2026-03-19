@@ -61,15 +61,11 @@ param monthlyBudgetAmount int = 0
 @description('Email addresses notified when the budget crosses an alert threshold.')
 param budgetAlertEmails array = []
 
-@description('List of AOS application module names — one dedicated Flex Consumption plan and Function App is created per entry. These are the canonical AOS repository modules plus C-suite agents deployed to Azure; code-only repositories (purpose-driven-agent, leadership-agent) are not included as they are not deployed directly.')
+@description('List of AOS application module names — one dedicated Flex Consumption plan and Function App is created per entry. Each entry must be the GitHub repository name of an actual deployable Azure Function App. Code-only libraries (aos-kernel, aos-intelligence, aos-client-sdk, aos-dispatcher) are NOT included — they are imported by agent-operating-system at runtime. C-suite agents are excluded as they run as Foundry Agent Service endpoints.')
 param appNames array = [
-  'aos-kernel'
-  'aos-intelligence'
+  'agent-operating-system'
   'aos-realm-of-agents'
-  'aos-mcp-servers'
-  'aos-client-sdk'
   'business-infinity'
-  'aos-dispatcher'
 ]
 
 @description('List of C-suite agent app names that should be deployed to Foundry rather than as Function Apps')
@@ -115,8 +111,19 @@ var uniqueSuffix = uniqueString(resourceGroup().id, projectName, environment)
 // Core AOS orchestration hub — its URL is injected into every module's env vars for peer discovery.
 // The hostname follows the same naming formula used in functionapp.bicep:
 //   func-{appName}-{environment}-{take(uniqueSuffix,6)}.azurewebsites.net
-var coreAppName = 'aos-dispatcher'
+var coreAppName = 'agent-operating-system'
 var coreAppUrl = 'https://func-${coreAppName}-${environment}-${take(uniqueSuffix, 6)}.azurewebsites.net'
+
+// Computed URLs — derived from deterministic naming patterns that match the variables in their
+// respective modules. Using computed values instead of module outputs breaks the ARM dependency
+// chain, allowing Function Apps to deploy independently even when the AI Gateway or AI Project
+// module encounters an error.  The URL values are best-effort: if the module did not deploy, the
+// environment variable is set but will not resolve until the module is provisioned.
+var aiGatewayComputedName = 'ai-gw-${projectName}-${environment}-${take(uniqueSuffix, 6)}'
+var aiGatewayComputedUrl = 'https://${aiGatewayComputedName}.azure-api.net'
+// Azure ML workspace discovery URL — pattern: https://<workspace>.<region>.api.azureml.ms
+var aiProjectComputedName = 'ai-project-${projectName}-${environment}-${take(uniqueSuffix, 6)}'
+var foundryProjectEndpointComputed = 'https://${aiProjectComputedName}.${locationML}.api.azureml.ms'
 
 // ====================================================================
 // Modules
@@ -277,14 +284,15 @@ module aiGateway 'modules/ai-gateway.bicep' = {
 
 // A2A Connections — Agent-to-Agent connections for C-suite boardroom orchestration
 // Creates connections of type Agent2Agent for each specialist (CFO, CTO, CSO, CMO)
-// All A2A traffic routes through the AI Gateway / Foundry Private Link substrate
+// All A2A traffic routes through the AI Gateway / Foundry Private Link substrate.
+// Uses computed AI project name and gateway URL (no hard dependency on aiProject/aiGateway modules).
 module a2aConnections 'modules/a2a-connections.bicep' = {
   name: 'a2a-connections-${suffix}'
   params: {
     environment: environment
     projectName: projectName
-    aiProjectName: aiProject.outputs.projectName
-    aiGatewayUrl: aiGateway.outputs.gatewayUrl
+    aiProjectName: aiProjectComputedName
+    aiGatewayUrl: aiGatewayComputedUrl
   }
 }
 
@@ -308,11 +316,12 @@ module functionApps 'modules/functionapp.bicep' = [for appName in appNames: {
     coreAppUrl: coreAppUrl
     githubOrg: githubOrg
     githubEnvironment: environment
-    // Foundry Agent Service — project endpoint and AI Gateway URL
-    foundryProjectEndpoint: aiProject.outputs.projectDiscoveryUrl
-    aiGatewayUrl: aiGateway.outputs.gatewayUrl
+    // Foundry Agent Service — project endpoint and AI Gateway URL (computed from deterministic
+    // naming formulas; no hard ARM dependency on the AI Project or AI Gateway modules)
+    foundryProjectEndpoint: foundryProjectEndpointComputed
+    aiGatewayUrl: aiGatewayComputedUrl
     aiServicesAccountId: aiServices.outputs.accountId
-    // Custom domain: <appName>.<baseDomain> (e.g. aos-dispatcher.asisaga.com)
+    // Custom domain: <appName>.<baseDomain> (e.g. agent-operating-system.asisaga.com)
     customDomain: !empty(baseDomain) ? '${appName}.${baseDomain}' : ''
   }
 }]
@@ -340,9 +349,10 @@ module mcpServerFunctionApps 'modules/functionapp.bicep' = [for mcpApp in mcpSer
     coreAppUrl: coreAppUrl
     githubOrg: githubOrg
     githubEnvironment: environment
-    // Foundry Agent Service — project endpoint and AI Gateway URL
-    foundryProjectEndpoint: aiProject.outputs.projectDiscoveryUrl
-    aiGatewayUrl: aiGateway.outputs.gatewayUrl
+    // Foundry Agent Service — project endpoint and AI Gateway URL (computed from deterministic
+    // naming formulas; no hard ARM dependency on the AI Project or AI Gateway modules)
+    foundryProjectEndpoint: foundryProjectEndpointComputed
+    aiGatewayUrl: aiGatewayComputedUrl
     aiServicesAccountId: aiServices.outputs.accountId
     // Custom domain: githubRepo IS the full domain for MCP servers (e.g. erpnext.asisaga.com).
     // Conditional on baseDomain being non-empty so that dev/staging environments that set
