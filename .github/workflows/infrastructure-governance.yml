@@ -1,9 +1,6 @@
 name: Infrastructure Governance
 
 on:
-  schedule:
-    # Run daily at 06:00 UTC
-    - cron: '0 6 * * *'
   workflow_dispatch:
     inputs:
       environment:
@@ -19,17 +16,17 @@ on:
       enforce_policies:
         description: 'Assign AOS governance policies'
         required: false
-        default: 'false'
+        default: false
         type: boolean
       check_budget:
         description: 'Check budget status and alerts'
         required: false
-        default: 'true'
+        default: true
         type: boolean
       review_rbac:
         description: 'Run privileged-access review'
         required: false
-        default: 'true'
+        default: true
         type: boolean
       required_tags:
         description: 'Comma-separated key=value tag pairs to enforce (e.g. environment=dev,team=platform)'
@@ -45,9 +42,9 @@ env:
 
 jobs:
   governance:
-    name: 'Governance — ${{ inputs.environment || ''dev'' }}'
+    name: 'Governance — ${{ inputs.environment }}'
     runs-on: ubuntu-latest
-    environment: ${{ inputs.environment || 'dev' }}
+    environment: ${{ inputs.environment }}
 
     steps:
       - name: Checkout
@@ -62,6 +59,7 @@ jobs:
         run: pip install -r deployment/orchestrator/requirements.txt
 
       - name: Azure login
+        id: login
         uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
@@ -71,13 +69,15 @@ jobs:
       - name: Resolve inputs
         id: resolve
         run: |
-          ENV="${{ inputs.environment || 'dev' }}"
+          ENV="${{ inputs.environment }}"
           RG="${{ inputs.resource_group }}"
           [ -z "$RG" ] && RG="rg-aos-${ENV}"
           echo "environment=$ENV" >> "$GITHUB_OUTPUT"
           echo "resource_group=$RG" >> "$GITHUB_OUTPUT"
 
       - name: Policy compliance evaluation
+        id: policy
+        continue-on-error: true
         run: |
           python - <<'EOF'
           import sys, json
@@ -91,7 +91,9 @@ jobs:
           EOF
 
       - name: Required tag enforcement
-        if: ${{ inputs.required_tags != '' }}
+        id: tags
+        if: inputs.required_tags != ''
+        continue-on-error: true
         run: |
           python - <<'EOF'
           import sys
@@ -108,7 +110,9 @@ jobs:
           EOF
 
       - name: Budget status check
-        if: ${{ inputs.check_budget == 'true' || inputs.check_budget == true }}
+        id: budget
+        if: inputs.check_budget == true
+        continue-on-error: true
         run: |
           python - <<'EOF'
           import sys
@@ -121,7 +125,9 @@ jobs:
           EOF
 
       - name: Privileged access review
-        if: ${{ inputs.review_rbac == 'true' || inputs.review_rbac == true }}
+        id: rbac
+        if: inputs.review_rbac == true
+        continue-on-error: true
         run: |
           python - <<'EOF'
           import sys
@@ -134,7 +140,9 @@ jobs:
           EOF
 
       - name: Assign AOS governance policies
-        if: ${{ inputs.enforce_policies == 'true' || inputs.enforce_policies == true }}
+        id: assign
+        if: inputs.enforce_policies == true
+        continue-on-error: true
         run: |
           python - <<'EOF'
           import sys
@@ -151,10 +159,52 @@ jobs:
         run: |
           echo "## 🏛️ Governance Summary" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Check | Status |" >> "$GITHUB_STEP_SUMMARY"
-          echo "|-------|--------|" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Environment | \`${{ steps.resolve.outputs.environment }}\` |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Resource Group | \`${{ steps.resolve.outputs.resource_group }}\` |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Policy compliance | ✅ evaluated |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Budget check | ${{ (inputs.check_budget == 'true' || inputs.check_budget == true) && '✅ checked' || '⏭️ skipped' }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| RBAC review | ${{ (inputs.review_rbac == 'true' || inputs.review_rbac == true) && '✅ reviewed' || '⏭️ skipped' }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Check | Status | Guidance |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-------|--------|----------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Environment | \`${{ steps.resolve.outputs.environment }}\` | |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Resource Group | \`${{ steps.resolve.outputs.resource_group }}\` | |" >> "$GITHUB_STEP_SUMMARY"
+
+          # Policy
+          if [[ "${{ steps.policy.outcome }}" == "success" ]]; then
+            echo "| Policy compliance | ✅ evaluated | |" >> "$GITHUB_STEP_SUMMARY"
+          elif [[ "${{ steps.policy.outcome }}" == "failure" ]]; then
+            echo "| Policy compliance | ❌ failed | Check Azure login and ensure the service principal has \`Reader\` on the resource group. |" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "| Policy compliance | ⏭️ skipped | |" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          # Tags
+          if [[ "${{ steps.tags.outcome }}" == "success" ]]; then
+            echo "| Tag enforcement | ✅ checked | |" >> "$GITHUB_STEP_SUMMARY"
+          elif [[ "${{ steps.tags.outcome }}" == "failure" ]]; then
+            echo "| Tag enforcement | ❌ failed | Review the warning annotations above for missing tags. Apply tags manually via \`az tag update\`. |" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "| Tag enforcement | ⏭️ skipped | Provide \`required_tags\` input to enable. |" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          # Budget
+          if [[ "${{ steps.budget.outcome }}" == "success" ]]; then
+            echo "| Budget check | ✅ checked | |" >> "$GITHUB_STEP_SUMMARY"
+          elif [[ "${{ steps.budget.outcome }}" == "failure" ]]; then
+            echo "| Budget check | ❌ failed | Verify Cost Management API access. Ensure the SP has \`Cost Management Reader\` role. |" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "| Budget check | ⏭️ skipped | |" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          # RBAC
+          if [[ "${{ steps.rbac.outcome }}" == "success" ]]; then
+            echo "| RBAC review | ✅ reviewed | |" >> "$GITHUB_STEP_SUMMARY"
+          elif [[ "${{ steps.rbac.outcome }}" == "failure" ]]; then
+            echo "| RBAC review | ❌ failed | Ensure the SP has \`Reader\` and \`User Access Administrator\` on the resource group. |" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "| RBAC review | ⏭️ skipped | |" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          # Policy assignment
+          if [[ "${{ steps.assign.outcome }}" == "success" ]]; then
+            echo "| Policy assignment | ✅ assigned | |" >> "$GITHUB_STEP_SUMMARY"
+          elif [[ "${{ steps.assign.outcome }}" == "failure" ]]; then
+            echo "| Policy assignment | ❌ failed | Ensure the SP has \`Resource Policy Contributor\` on the subscription scope. |" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "| Policy assignment | ⏭️ skipped | Set \`enforce_policies\` to \`true\` to enable. |" >> "$GITHUB_STEP_SUMMARY"
+          fi

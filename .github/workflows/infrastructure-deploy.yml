@@ -1,10 +1,10 @@
-name: Infrastructure Deployment Agent
+name: Infrastructure Deployment
 
 on:
   workflow_dispatch:
     inputs:
       environment:
-        description: 'Target environment (dev, staging, prod)'
+        description: 'Target environment'
         required: true
         type: choice
         options:
@@ -12,7 +12,7 @@ on:
           - staging
           - prod
       resource_group:
-        description: 'Azure resource group name (auto-generated from environment if empty)'
+        description: 'Azure resource group name (leave blank for default rg-aos-<env>)'
         required: false
         type: string
       location:
@@ -35,196 +35,120 @@ on:
         required: false
         type: string
         default: 'deployment/main-modular.bicep'
+      dry_run:
+        description: 'Plan only — no actual changes (lint → validate → what-if)'
+        required: false
+        type: boolean
+        default: false
       skip_health_checks:
         description: 'Skip post-deployment health checks'
         required: false
         type: boolean
         default: false
-  
-  pull_request:
-    types: [labeled]
-    paths:
-      - 'deployment/**/*.bicep'
-      - 'deployment/**/*.bicepparam'
-      - 'deployment/deploy.py'
-      - 'deployment/orchestrator/**'
-  
-  issue_comment:
-    types: [created]
 
 permissions:
   id-token: write
   contents: read
-  pull-requests: write
-  issues: write
+
+env:
+  PYTHON_VERSION: '3.12'
 
 jobs:
-  # Pre-flight checks and environment setup
-  setup:
-    name: Setup and Validation
+  # ============================================================================
+  # VALIDATE — Lint, validate Bicep templates and parameters
+  # ============================================================================
+  validate:
+    name: Validate Templates
     runs-on: ubuntu-latest
     outputs:
-      should_deploy: ${{ steps.check.outputs.should_deploy }}
-      environment: ${{ steps.check.outputs.environment }}
-      resource_group: ${{ steps.check.outputs.resource_group }}
-      location: ${{ steps.check.outputs.location }}
-      geography: ${{ steps.check.outputs.geography }}
-      template: ${{ steps.check.outputs.template }}
-      parameters_file: ${{ steps.check.outputs.parameters_file }}
-      is_dry_run: ${{ steps.check.outputs.is_dry_run }}
-    
+      environment: ${{ steps.resolve.outputs.environment }}
+      resource_group: ${{ steps.resolve.outputs.resource_group }}
+      parameters_file: ${{ steps.resolve.outputs.parameters_file }}
+      is_dry_run: ${{ steps.resolve.outputs.is_dry_run }}
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v6
-      
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: '3.11'
-      
-      - name: Check deployment trigger and intent
-        id: check
-        env:
-          GITHUB_EVENT_NAME: ${{ github.event_name }}
-          INPUT_ENVIRONMENT: ${{ github.event.inputs.environment || 'dev' }}
-          INPUT_RESOURCE_GROUP: ${{ github.event.inputs.resource_group }}
-          INPUT_LOCATION: ${{ github.event.inputs.location }}
-          INPUT_GEOGRAPHY: ${{ github.event.inputs.geography }}
-          INPUT_TEMPLATE: ${{ github.event.inputs.template || 'deployment/main-modular.bicep' }}
-          INPUT_SKIP_HEALTH_CHECKS: ${{ github.event.inputs.skip_health_checks }}
-          PR_LABEL_DEPLOY_DEV: ${{ contains(github.event.pull_request.labels.*.name, 'deploy:dev') }}
-          PR_LABEL_DEPLOY_STAGING: ${{ contains(github.event.pull_request.labels.*.name, 'deploy:staging') }}
-          PR_LABEL_STATUS_APPROVED: ${{ contains(github.event.pull_request.labels.*.name, 'status:approved') }}
-          PR_LABEL_ACTION_DEPLOY: ${{ contains(github.event.pull_request.labels.*.name, 'action:deploy') }}
-          COMMENT_BODY: ${{ github.event.comment.body }}
-        run: |
-          python3 deployment/orchestrator/cli/workflow_helper.py check-trigger
-
-  # Agent Layer: Orchestrate the deployment
-  deploy:
-    name: Deploy Infrastructure (Agent Layer)
-    needs: setup
-    if: needs.setup.outputs.should_deploy == 'true' || needs.setup.outputs.is_dry_run == 'true'
-    runs-on: ubuntu-latest
-    environment: ${{ needs.setup.outputs.environment }}
-    
-    steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
-      
-      - name: Post deployment start comment
-        if: github.event_name == 'pull_request' || github.event_name == 'issue_comment'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const isDryRun = '${{ needs.setup.outputs.is_dry_run }}' === 'true';
-            const environment = '${{ needs.setup.outputs.environment }}';
-            const mode = isDryRun ? 'Plan/Analysis' : 'Deployment';
-            
-            const body = `## 🚀 Infrastructure ${mode} Started
-            
-            **Environment**: \`${environment}\`
-            **Resource Group**: \`${{ needs.setup.outputs.resource_group }}\`
-            **Region**: auto-selecting optimal region(s) for each service…
-            **Template**: \`${{ needs.setup.outputs.template }}\`
-            
-            ${isDryRun ? '📊 Running in **plan mode** - no actual changes will be made.' : '⚙️  Running **live deployment** - infrastructure will be modified.'}
-            
-            The agent is now analyzing the deployment...
-            `;
-            
-            if (context.eventName === 'pull_request') {
-              github.rest.issues.createComment({
-                issue_number: context.issue.number,
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                body: body
-              });
-            }
-      
+
+      - name: Resolve inputs
+        id: resolve
+        run: |
+          ENV="${{ inputs.environment }}"
+          RG="${{ inputs.resource_group }}"
+          [ -z "$RG" ] && RG="rg-aos-${ENV}"
+          TEMPLATE="${{ inputs.template || 'deployment/main-modular.bicep' }}"
+          IS_DRY_RUN="${{ inputs.dry_run }}"
+          PARAMS="deployment/parameters/${ENV}.bicepparam"
+          [ ! -f "$PARAMS" ] && PARAMS=""
+
+          echo "environment=$ENV"       >> "$GITHUB_OUTPUT"
+          echo "resource_group=$RG"     >> "$GITHUB_OUTPUT"
+          echo "template=$TEMPLATE"     >> "$GITHUB_OUTPUT"
+          echo "parameters_file=$PARAMS" >> "$GITHUB_OUTPUT"
+          echo "is_dry_run=$IS_DRY_RUN" >> "$GITHUB_OUTPUT"
+
+      - name: Install Azure Bicep
+        run: az bicep install
+
+      - name: Lint Bicep template
+        id: lint
+        continue-on-error: true
+        run: |
+          echo "🔍 Linting ${{ inputs.template || 'deployment/main-modular.bicep' }}..."
+          az bicep lint --file "${{ inputs.template || 'deployment/main-modular.bicep' }}" 2>&1 | tee lint-output.txt
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Validation summary
+        if: always()
+        run: |
+          echo "## 🔍 Template Validation" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Check | Status |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-------|--------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Bicep lint | ${{ steps.lint.outcome == 'success' && '✅ passed' || '⚠️ warnings (non-blocking)' }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Environment | \`${{ steps.resolve.outputs.environment }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Resource Group | \`${{ steps.resolve.outputs.resource_group }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Mode | ${{ inputs.dry_run == true && '📋 Plan (dry-run)' || '🚀 Deploy' }} |" >> "$GITHUB_STEP_SUMMARY"
+
+  # ============================================================================
+  # DEPLOY — Execute the Python orchestrator
+  # ============================================================================
+  deploy:
+    name: Deploy Infrastructure
+    needs: validate
+    runs-on: ubuntu-latest
+    environment: ${{ needs.validate.outputs.environment }}
+    outputs:
+      status: ${{ steps.orchestrator.outcome }}
+      failure_type: ${{ steps.analyze.outputs.failure_type }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-          cache: 'pip'
-      
-      - name: Install Python dependencies
-        run: |
-          echo "📦 Installing Python dependencies..."
-          cd deployment
-          pip install -r orchestrator/requirements.txt
-          pip install --upgrade azure-cli
-      
-      - name: Verify Azure CLI
-        run: az version
-      
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: pip install -r deployment/orchestrator/requirements.txt
+
       - name: Azure Login (OIDC)
+        id: login
         uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-      
-      - name: Verify Azure authentication
-        run: |
-          az account show
-          az account list --output table
-      
-      - name: Auto-Select Deployment Regions
+
+      - name: Auto-select deployment regions
         id: region_select
         run: |
           python3 deployment/orchestrator/cli/workflow_helper.py select-regions \
-            --environment "${{ needs.setup.outputs.environment }}" \
-            --location "${{ needs.setup.outputs.location }}" \
-            --geography "${{ needs.setup.outputs.geography }}"
-      
-      - name: Regional Capability Validation
-        id: regional_validation
-        run: |
-          echo "🌍 Validating regional capabilities..."
-          
-          PRIMARY_REGION="${{ steps.region_select.outputs.primary_region }}"
-          ML_REGION="${{ steps.region_select.outputs.ml_region }}"
-          ENVIRONMENT="${{ needs.setup.outputs.environment }}"
-          
-          # Core services required for all environments
-          CORE_SERVICES="storage keyvault functions servicebus appinsights loganalytics identity"
-          if [[ "$ENVIRONMENT" == "prod" ]]; then
-            CORE_SERVICES="$CORE_SERVICES functions-premium servicebus-premium"
-          elif [[ "$ENVIRONMENT" == "staging" ]]; then
-            CORE_SERVICES="$CORE_SERVICES functions-premium"
-          fi
-          
-          echo "Primary Region : $PRIMARY_REGION"
-          echo "ML Region      : $ML_REGION"
-          echo "Environment    : $ENVIRONMENT"
-          
-          echo "--- Primary region validation ---"
-          python3 deployment/orchestrator/cli/regional_tool.py validate \
-            "$PRIMARY_REGION" $CORE_SERVICES > validation-output.txt 2>&1
-          VALIDATION_EXIT=$?
-          cat validation-output.txt
+            --environment "${{ needs.validate.outputs.environment }}" \
+            --location "${{ inputs.location }}" \
+            --geography "${{ inputs.geography }}"
 
-          if [[ "$ENVIRONMENT" != "dev" ]]; then
-            echo "--- ML region validation ($ML_REGION) ---"
-            python3 deployment/orchestrator/cli/regional_tool.py validate \
-              "$ML_REGION" azureml acr > ml-validation-output.txt 2>&1
-            cat ml-validation-output.txt
-          fi
-
-          if [[ $VALIDATION_EXIT -ne 0 ]]; then
-            echo "ℹ️  Some services have warnings in primary region – auto-selection already handled fallback."
-          else
-            echo "✅ Primary region $PRIMARY_REGION supports all required core services"
-          fi
-
-          echo "validation_exit=$VALIDATION_EXIT" >> $GITHUB_OUTPUT
-
-          echo "📊 Deployment Summary for $PRIMARY_REGION:"
-          python3 deployment/orchestrator/cli/regional_tool.py summary \
-            "$PRIMARY_REGION" $CORE_SERVICES
-      
-      - name: Execute Python Orchestrator (Logic Layer)
+      - name: Execute Python orchestrator
         id: orchestrator
         continue-on-error: true
         env:
@@ -232,254 +156,56 @@ jobs:
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
         run: |
-          echo "🐍 Executing Python orchestration layer..."
-          
-          PRIMARY_REGION="${{ steps.region_select.outputs.primary_region }}"
-          ML_REGION="${{ steps.region_select.outputs.ml_region }}"
-          PARAMETERS_FILE="${{ needs.setup.outputs.parameters_file }}"
-          IS_DRY_RUN="${{ needs.setup.outputs.is_dry_run }}"
-          
-          # Select subcommand based on dry-run flag
-          if [[ "$IS_DRY_RUN" == "true" ]]; then
-            echo "📋 Running in PLAN mode (dry-run)"
+          if [[ "${{ needs.validate.outputs.is_dry_run }}" == "true" ]]; then
             SUBCOMMAND="plan"
           else
             SUBCOMMAND="deploy"
           fi
-          
-          # Build argument list without shell evaluation
+
           ARGS=(
             "$SUBCOMMAND"
-            --resource-group "${{ needs.setup.outputs.resource_group }}"
-            --location "$PRIMARY_REGION"
-            --location-ml "$ML_REGION"
-            --environment "${{ needs.setup.outputs.environment }}"
-            --template "${{ needs.setup.outputs.template }}"
+            --resource-group "${{ needs.validate.outputs.resource_group }}"
+            --location "${{ steps.region_select.outputs.primary_region }}"
+            --location-ml "${{ steps.region_select.outputs.ml_region }}"
+            --environment "${{ needs.validate.outputs.environment }}"
+            --template "${{ inputs.template || 'deployment/main-modular.bicep' }}"
             --allow-warnings
             --git-sha "${{ github.sha }}"
           )
-          
-          if [[ -n "$PARAMETERS_FILE" && -f "$PARAMETERS_FILE" ]]; then
-            ARGS+=(--parameters "$PARAMETERS_FILE")
+
+          PARAMS="${{ needs.validate.outputs.parameters_file }}"
+          if [[ -n "$PARAMS" && -f "$PARAMS" ]]; then
+            ARGS+=(--parameters "$PARAMS")
           fi
-          
-          if [[ "${{ github.event.inputs.skip_health_checks }}" == "true" ]]; then
+
+          if [[ "${{ inputs.skip_health_checks }}" == "true" ]]; then
             ARGS+=(--skip-health)
           fi
-          
+
           set +e
           python3 deployment/deploy.py "${ARGS[@]}" 2>&1 | tee orchestrator-output.log
           EXIT_CODE=${PIPESTATUS[0]}
           set -e
-          
-          echo "exit_code=${EXIT_CODE}" >> $GITHUB_OUTPUT
-          echo "output_file=orchestrator-output.log" >> $GITHUB_OUTPUT
+
+          echo "exit_code=${EXIT_CODE}" >> "$GITHUB_OUTPUT"
+          echo "output_file=orchestrator-output.log" >> "$GITHUB_OUTPUT"
           exit ${EXIT_CODE}
-      
-      - name: Analyze orchestrator output (Agent Intelligence)
+
+      - name: Analyze orchestrator output
         id: analyze
         if: always()
         run: |
           python3 deployment/orchestrator/cli/workflow_helper.py analyze-output \
-            --log-file "${{ steps.orchestrator.outputs.output_file }}" \
-            --exit-code "${{ steps.orchestrator.outputs.exit_code }}"
-      
-      - name: Autonomous logic error fixing
-        id: fix_logic_error
-        if: steps.analyze.outputs.failure_type == 'logic'
-        continue-on-error: true
-        run: |
-          echo "🤖 Autonomous error fixing: Attempting to fix logic error..."
-          
-          ERROR_FILE="${{ steps.analyze.outputs.error_file }}"
-          
-          if [[ ! -f "$ERROR_FILE" ]]; then
-            echo "❌ Error file not found: $ERROR_FILE"
-            echo "fix_success=false" >> $GITHUB_OUTPUT
-            exit 1
-          fi
-          
-          set +e
-          python3 .github/skills/deployment-error-fixer/scripts/fix_error.py \
-            --error-file "$ERROR_FILE" \
-            --deployment-dir deployment/ \
-            --auto-fix \
-            2>&1 | tee fix-output.log
-          FIX_EXIT_CODE=${PIPESTATUS[0]}
-          set -e
-          
-          if [[ $FIX_EXIT_CODE -eq 0 ]]; then
-            echo "✅ Error fixed autonomously!"
-            echo "fix_success=true" >> $GITHUB_OUTPUT
-            
-            echo "🔄 Retrying deployment after autonomous fix..."
-            
-            PRIMARY_REGION="${{ steps.region_select.outputs.primary_region }}"
-            ML_REGION="${{ steps.region_select.outputs.ml_region }}"
-            PARAMETERS_FILE="${{ needs.setup.outputs.parameters_file }}"
-            
-            ARGS=(
-              deploy
-              --resource-group "${{ needs.setup.outputs.resource_group }}"
-              --location "$PRIMARY_REGION"
-              --location-ml "$ML_REGION"
-              --environment "${{ needs.setup.outputs.environment }}"
-              --template "${{ needs.setup.outputs.template }}"
-              --allow-warnings
-              --git-sha "${{ github.sha }}"
-            )
-            
-            if [[ -n "$PARAMETERS_FILE" && -f "$PARAMETERS_FILE" ]]; then
-              ARGS+=(--parameters "$PARAMETERS_FILE")
-            fi
-            
-            set +e
-            python3 deployment/deploy.py "${ARGS[@]}" 2>&1 | tee orchestrator-retry-after-fix.log
-            RETRY_EXIT_CODE=${PIPESTATUS[0]}
-            set -e
-            
-            if [[ $RETRY_EXIT_CODE -eq 0 ]]; then
-              echo "✅ Deployment succeeded after autonomous fix!"
-              echo "retry_success=true" >> $GITHUB_OUTPUT
-            else
-              echo "❌ Deployment still failed after fix"
-              echo "retry_success=false" >> $GITHUB_OUTPUT
-              exit 1
-            fi
-          else
-            echo "❌ Could not auto-fix error"
-            echo "fix_success=false" >> $GITHUB_OUTPUT
-            exit 1
-          fi
-      
-      - name: Self-healing retry (Environmental failures only)
-        id: retry
-        if: steps.analyze.outputs.should_retry == 'true' && steps.analyze.outputs.is_transient == 'true'
-        continue-on-error: true
-        run: |
-          python3 deployment/orchestrator/cli/workflow_helper.py retry \
-            --resource-group "${{ needs.setup.outputs.resource_group }}" \
-            --location "${{ steps.region_select.outputs.primary_region }}" \
-            --location-ml "${{ steps.region_select.outputs.ml_region }}" \
-            --environment "${{ needs.setup.outputs.environment }}" \
-            --template "${{ needs.setup.outputs.template }}" \
-            --parameters "${{ needs.setup.outputs.parameters_file }}" \
-            --git-sha "${{ github.sha }}" \
-            --max-retries 3
-      
+            --log-file "${{ steps.orchestrator.outputs.output_file || 'orchestrator-output.log' }}" \
+            --exit-code "${{ steps.orchestrator.outputs.exit_code || '1' }}"
+
       - name: Extract deployment summary
         id: summary
         if: always()
         run: |
           python3 deployment/orchestrator/cli/workflow_helper.py extract-summary \
             --audit-dir deployment/audit
-      
-      - name: Post deployment result comment
-        if: always() && (github.event_name == 'pull_request' || github.event_name == 'issue_comment')
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const status = '${{ steps.analyze.outputs.status }}';
-            const failureType = '${{ steps.analyze.outputs.failure_type }}';
-            const rbacPermissionError = '${{ steps.analyze.outputs.rbac_permission_error }}' === 'true';
-            const retrySuccess = '${{ steps.retry.outputs.retry_success }}';
-            const retryCount = '${{ steps.retry.outputs.retry_count }}';
-            const fixSuccess = '${{ steps.fix_logic_error.outputs.fix_success }}';
-            const fixRetrySuccess = '${{ steps.fix_logic_error.outputs.retry_success }}';
-            const environment = '${{ needs.setup.outputs.environment }}';
-            const isDryRun = '${{ needs.setup.outputs.is_dry_run }}' === 'true';
-            
-            // Resource change counts from what-if analysis
-            const whatIfCreates   = parseInt('${{ steps.summary.outputs.what_if_creates }}')   || 0;
-            const whatIfNoChanges = parseInt('${{ steps.summary.outputs.what_if_no_changes }}') || 0;
-            const whatIfModifies  = parseInt('${{ steps.summary.outputs.what_if_modifies }}')   || 0;
-            const whatIfDeletes   = parseInt('${{ steps.summary.outputs.what_if_deletes }}')    || 0;
-            
-            let emoji = '❓';
-            let statusText = 'Unknown';
-            let details = '';
-            
-            if (status === 'success' || retrySuccess === 'true' || fixRetrySuccess === 'true') {
-              emoji = '✅';
-              statusText = 'Successful';
-              
-              if (retrySuccess === 'true') {
-                details = `\n\n**Self-Healing**: The deployment initially failed with a transient error, but succeeded after ${retryCount} retry attempt(s). 🔄✨`;
-              }
-              
-              if (fixRetrySuccess === 'true') {
-                details = `\n\n**Autonomous Fix**: The deployment initially failed with a logic error, but the agent autonomously fixed the issue and deployment succeeded! 🤖✨`;
-              }
-              
-              const deployedResources = '${{ steps.summary.outputs.deployed_resources }}';
-              const duration = '${{ steps.summary.outputs.duration }}';
-              
-              if (deployedResources && deployedResources !== '0') {
-                details += `\n\n**Deployed Resources**: ${deployedResources}`;
-              }
-              if (duration && duration !== 'N/A') {
-                details += `\n**Duration**: ${duration} seconds`;
-              }
-            } else if (status === 'failed') {
-              emoji = '❌';
-              statusText = 'Failed';
-              
-              if (failureType === 'permissions' || rbacPermissionError) {
-                const spClientId = '${{ secrets.AZURE_CLIENT_ID }}';
-                const resourceGroup = '${{ needs.setup.outputs.resource_group }}';
-                details = `\n\n**Failure Type**: RBAC Permissions\n**Action Required**: The deployment service principal (\`${spClientId}\`) lacks \`Microsoft.Authorization/roleAssignments/write\`.\n\nGrant the SP the **User Access Administrator** or **Owner** role on the target resource group:\n\`\`\`bash\naz role assignment create \\\\\n  --assignee "${spClientId}" \\\\\n  --role "User Access Administrator" \\\\\n  --resource-group "${resourceGroup}"\n\`\`\`\n\n⚠️ This is a permissions issue that requires manual intervention.`;
-              } else if (failureType === 'logic') {
-                if (fixSuccess === 'false') {
-                  details = `\n\n**Failure Type**: Logic Error (Code/Template)\n**Autonomous Fix**: Attempted but failed\n**Action Required**: The agent could not automatically fix this error. Please review the logs and fix manually.\n\n⚠️ This is a code error that requires manual intervention.`;
-                } else {
-                  details = `\n\n**Failure Type**: Logic Error (Code/Template)\n**Action Required**: Please fix the Bicep template or parameters and try again.\n\n⚠️ **No retry attempted** - this is a code error that requires manual intervention.`;
-                }
-              } else if (failureType === 'environmental') {
-                if (retrySuccess === 'false') {
-                  details = `\n\n**Failure Type**: Environmental (Transient Azure Issue)\n**Retries Attempted**: ${retryCount || 'N/A'}\n\n⚠️ The issue persisted after retry attempts. This may require:\n- Checking Azure service health\n- Trying again later\n- Adjusting resource configurations`;
-                } else {
-                  details = `\n\n**Failure Type**: Environmental (Transient Azure Issue)\n**Retries**: In progress...`;
-                }
-              } else {
-                details = `\n\n**Failure Type**: Unknown\n**Action Required**: Please check the workflow logs for details.`;
-              }
-            }
-            
-            // Build what-if resource summary section
-            let resourceSummary = '';
-            if (whatIfCreates + whatIfNoChanges + whatIfModifies + whatIfDeletes > 0) {
-              resourceSummary = `\n\n### 📊 Resource Change Preview (What-If)\n`;
-              if (whatIfCreates   > 0) resourceSummary += `- ✅ **To provision** (create): ${whatIfCreates}\n`;
-              if (whatIfNoChanges > 0) resourceSummary += `- 📦 **Already provisioned** (no change): ${whatIfNoChanges}\n`;
-              if (whatIfModifies  > 0) resourceSummary += `- 🔄 **To update** (modify): ${whatIfModifies}\n`;
-              if (whatIfDeletes   > 0) resourceSummary += `- 🗑️ **To remove** (delete): ${whatIfDeletes}\n`;
-            }
-            
-            const mode = isDryRun ? 'Plan/Analysis' : 'Deployment';
-            
-            const body = `## ${emoji} Infrastructure ${mode} ${statusText}
-            
-            **Environment**: \`${environment}\`
-            **Resource Group**: \`${{ needs.setup.outputs.resource_group }}\`
-            **Primary Region**: \`${{ steps.region_select.outputs.primary_region }}\`
-            **Azure ML Region**: \`${{ steps.region_select.outputs.ml_region }}\`
-            **Status**: ${statusText}
-            ${details}
-            ${resourceSummary}
-            ${isDryRun ? '📊 This was a **plan/dry-run** - no actual infrastructure changes were made.' : ''}
-            
-            [View workflow run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
-            `;
-            
-            if (context.eventName === 'pull_request') {
-              github.rest.issues.createComment({
-                issue_number: context.issue.number,
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                body: body
-              });
-            }
-      
+
       - name: Upload audit logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -488,31 +214,196 @@ jobs:
           path: |
             deployment/audit/*.json
             orchestrator-*.log
-            error-message.txt
           retention-days: 90
           if-no-files-found: ignore
-      
-      - name: Final status check
+
+      - name: Deployment result
         if: always()
         run: |
-          STATUS="${{ steps.analyze.outputs.status }}"
-          RETRY_SUCCESS="${{ steps.retry.outputs.retry_success }}"
-          FIX_RETRY_SUCCESS="${{ steps.fix_logic_error.outputs.retry_success }}"
+          STATUS="${{ steps.orchestrator.outcome }}"
           FAILURE_TYPE="${{ steps.analyze.outputs.failure_type }}"
-          
-          if [[ "$STATUS" == "success" ]] || [[ "$RETRY_SUCCESS" == "true" ]] || [[ "$FIX_RETRY_SUCCESS" == "true" ]]; then
-            echo "✅ Deployment workflow completed successfully"
-            exit 0
-          elif [[ "${{ needs.setup.outputs.is_dry_run }}" == "true" ]]; then
-            echo "📊 Plan/dry-run completed"
-            exit 0
-          elif [[ "$FAILURE_TYPE" == "permissions" ]]; then
-            echo "❌ Deployment failed: RBAC permissions error"
-            echo "   Grant the service principal 'User Access Administrator' or 'Owner' role"
-            echo "   on resource group '${{ needs.setup.outputs.resource_group }}' to allow"
-            echo "   Microsoft.Authorization/roleAssignments/write."
-            exit 1
+          IS_DRY_RUN="${{ needs.validate.outputs.is_dry_run }}"
+          WHAT_IF_CREATES="${{ steps.summary.outputs.what_if_creates }}"
+          WHAT_IF_NO_CHANGES="${{ steps.summary.outputs.what_if_no_changes }}"
+          WHAT_IF_MODIFIES="${{ steps.summary.outputs.what_if_modifies }}"
+          WHAT_IF_DELETES="${{ steps.summary.outputs.what_if_deletes }}"
+
+          echo "## 🚀 Deployment Result" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          if [[ "$STATUS" == "success" ]]; then
+            echo "### ✅ Deployment Succeeded" >> "$GITHUB_STEP_SUMMARY"
+          elif [[ "$IS_DRY_RUN" == "true" ]]; then
+            echo "### 📋 Plan Completed" >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "❌ Deployment workflow failed (failure_type=${FAILURE_TYPE})"
-            exit 1
+            echo "### ❌ Deployment Failed" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "**Failure type**: \`${FAILURE_TYPE}\`" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+
+            case "$FAILURE_TYPE" in
+              permissions)
+                echo "#### 🔑 Action Required: RBAC Permissions" >> "$GITHUB_STEP_SUMMARY"
+                echo "" >> "$GITHUB_STEP_SUMMARY"
+                echo "The deployment service principal lacks \`Microsoft.Authorization/roleAssignments/write\`." >> "$GITHUB_STEP_SUMMARY"
+                echo "" >> "$GITHUB_STEP_SUMMARY"
+                echo "**Fix**: Grant the service principal **User Access Administrator** or **Owner** on \`${{ needs.validate.outputs.resource_group }}\`:" >> "$GITHUB_STEP_SUMMARY"
+                echo '```bash' >> "$GITHUB_STEP_SUMMARY"
+                echo "az role assignment create \\" >> "$GITHUB_STEP_SUMMARY"
+                echo "  --assignee \"\$AZURE_CLIENT_ID\" \\" >> "$GITHUB_STEP_SUMMARY"
+                echo "  --role \"User Access Administrator\" \\" >> "$GITHUB_STEP_SUMMARY"
+                echo "  --resource-group \"${{ needs.validate.outputs.resource_group }}\"" >> "$GITHUB_STEP_SUMMARY"
+                echo '```' >> "$GITHUB_STEP_SUMMARY"
+                ;;
+              logic)
+                echo "#### 🐛 Action Required: Template/Code Error" >> "$GITHUB_STEP_SUMMARY"
+                echo "" >> "$GITHUB_STEP_SUMMARY"
+                echo "A Bicep template or Python orchestrator error was detected." >> "$GITHUB_STEP_SUMMARY"
+                echo "" >> "$GITHUB_STEP_SUMMARY"
+                echo "**Fix**: Review the orchestrator log artifact for the specific error, fix the template or parameters, and re-run." >> "$GITHUB_STEP_SUMMARY"
+                ;;
+              environmental)
+                echo "#### 🌐 Action Required: Transient Azure Error" >> "$GITHUB_STEP_SUMMARY"
+                echo "" >> "$GITHUB_STEP_SUMMARY"
+                echo "An Azure platform error occurred (throttling, timeout, service outage)." >> "$GITHUB_STEP_SUMMARY"
+                echo "" >> "$GITHUB_STEP_SUMMARY"
+                echo "**Fix**: Wait a few minutes and re-run. Check [Azure Status](https://status.azure.com) if the issue persists." >> "$GITHUB_STEP_SUMMARY"
+                ;;
+              *)
+                echo "#### ⚠️ Review the orchestrator log artifact for details." >> "$GITHUB_STEP_SUMMARY"
+                ;;
+            esac
           fi
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Detail | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|--------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Environment | \`${{ needs.validate.outputs.environment }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Resource Group | \`${{ needs.validate.outputs.resource_group }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Primary Region | \`${{ steps.region_select.outputs.primary_region }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| ML Region | \`${{ steps.region_select.outputs.ml_region }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Mode | ${{ needs.validate.outputs.is_dry_run == 'true' && 'Plan (dry-run)' || 'Deploy' }} |" >> "$GITHUB_STEP_SUMMARY"
+
+          if [[ -n "$WHAT_IF_CREATES" ]] && [[ "$WHAT_IF_CREATES" != "0" || "$WHAT_IF_NO_CHANGES" != "0" || "$WHAT_IF_MODIFIES" != "0" || "$WHAT_IF_DELETES" != "0" ]]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "### 📊 Resource Changes (What-If)" >> "$GITHUB_STEP_SUMMARY"
+            echo "| Action | Count |" >> "$GITHUB_STEP_SUMMARY"
+            echo "|--------|-------|" >> "$GITHUB_STEP_SUMMARY"
+            echo "| ✅ Create | ${WHAT_IF_CREATES:-0} |" >> "$GITHUB_STEP_SUMMARY"
+            echo "| 📦 No change | ${WHAT_IF_NO_CHANGES:-0} |" >> "$GITHUB_STEP_SUMMARY"
+            echo "| 🔄 Modify | ${WHAT_IF_MODIFIES:-0} |" >> "$GITHUB_STEP_SUMMARY"
+            echo "| 🗑️ Delete | ${WHAT_IF_DELETES:-0} |" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  # ============================================================================
+  # RESOURCE INVENTORY — Show what was provisioned and where code deploys
+  # ============================================================================
+  resource-inventory:
+    name: Resource Inventory
+    needs: [validate, deploy]
+    if: always()
+    runs-on: ubuntu-latest
+    environment: ${{ needs.validate.outputs.environment }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure Login (OIDC)
+        id: login
+        continue-on-error: true
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: List provisioned resources
+        id: inventory
+        continue-on-error: true
+        run: |
+          RG="${{ needs.validate.outputs.resource_group }}"
+
+          echo "## 📦 Provisioned Resource Inventory" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          if ! az group show --name "$RG" &>/dev/null; then
+            echo "Resource group \`$RG\` does not exist yet. Run the deployment first." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          RESOURCES=$(az resource list --resource-group "$RG" \
+            --query "[].{name:name, type:type, location:location}" -o json 2>/dev/null || echo "[]")
+
+          if [[ "$RESOURCES" == "[]" ]]; then
+            echo "No resources found in \`$RG\`." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          echo "### Resources in \`$RG\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Resource | Type | Location | Bicep Module |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|----------|------|----------|-------------|" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "$RESOURCES" | python3 deployment/orchestrator/cli/resource_mapper.py
+          " >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Code repository deployment guide
+        if: always()
+        run: |
+          ENV="${{ needs.validate.outputs.environment }}"
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### 🗺️ Code Repository → Azure Deployment Target" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Each code repository deploys to a dedicated Azure Function App created by \`modules/functionapp.bicep\`." >> "$GITHUB_STEP_SUMMARY"
+          echo "Function Apps follow the naming pattern: \`func-{appName}-${ENV}-{uniqueSuffix}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "#### Platform Services (Function Apps)" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Repository | Azure Function App | Custom Domain |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|------------|-------------------|---------------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| [aos-kernel](https://github.com/ASISaga/aos-kernel) | \`func-aos-kernel-${ENV}-*\` | \`aos-kernel.asisaga.com\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| [aos-intelligence](https://github.com/ASISaga/aos-intelligence) | \`func-aos-intelligence-${ENV}-*\` | \`aos-intelligence.asisaga.com\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| [aos-realm-of-agents](https://github.com/ASISaga/aos-realm-of-agents) | \`func-aos-realm-of-agents-${ENV}-*\` | \`aos-realm-of-agents.asisaga.com\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| [aos-mcp-servers](https://github.com/ASISaga/aos-mcp-servers) | \`func-aos-mcp-servers-${ENV}-*\` | \`aos-mcp-servers.asisaga.com\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| [aos-client-sdk](https://github.com/ASISaga/aos-client-sdk) | \`func-aos-client-sdk-${ENV}-*\` | \`aos-client-sdk.asisaga.com\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| [business-infinity](https://github.com/ASISaga/business-infinity) | \`func-business-infinity-${ENV}-*\` | \`business-infinity.asisaga.com\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| [aos-dispatcher](https://github.com/ASISaga/aos-dispatcher) | \`func-aos-dispatcher-${ENV}-*\` | \`aos-dispatcher.asisaga.com\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "#### MCP Server Modules (Function Apps)" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Repository | Azure Function App | Custom Domain |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|------------|-------------------|---------------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| [erpnext.asisaga.com](https://github.com/ASISaga/erpnext.asisaga.com) | \`func-mcp-erpnext-${ENV}-*\` | \`erpnext.asisaga.com\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| [linkedin.asisaga.com](https://github.com/ASISaga/linkedin.asisaga.com) | \`func-mcp-linkedin-${ENV}-*\` | \`linkedin.asisaga.com\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| [reddit.asisaga.com](https://github.com/ASISaga/reddit.asisaga.com) | \`func-mcp-reddit-${ENV}-*\` | \`reddit.asisaga.com\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| [subconscious.asisaga.com](https://github.com/ASISaga/subconscious.asisaga.com) | \`func-mcp-subconscious-${ENV}-*\` | \`subconscious.asisaga.com\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "#### C-Suite Agents (Foundry Endpoints)" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "C-suite agents deploy to Azure AI Foundry via \`modules/foundry-app.bicep\`, not as Function Apps." >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Repository | Foundry Endpoint | Bicep Module |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|------------|-----------------|-------------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| [ceo-agent](https://github.com/ASISaga/ceo-agent) | \`ceo-agent\` | \`modules/foundry-app.bicep\` + \`modules/lora-inference.bicep\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| [cfo-agent](https://github.com/ASISaga/cfo-agent) | \`cfo-agent\` | \`modules/foundry-app.bicep\` + \`modules/lora-inference.bicep\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| [cto-agent](https://github.com/ASISaga/cto-agent) | \`cto-agent\` | \`modules/foundry-app.bicep\` + \`modules/lora-inference.bicep\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| [cso-agent](https://github.com/ASISaga/cso-agent) | \`cso-agent\` | \`modules/foundry-app.bicep\` + \`modules/lora-inference.bicep\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| [cmo-agent](https://github.com/ASISaga/cmo-agent) | \`cmo-agent\` | \`modules/foundry-app.bicep\` + \`modules/lora-inference.bicep\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "#### Shared Infrastructure (Bicep modules, no separate code repo)" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Bicep Module | Resources Created | Purpose |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-------------|-------------------|---------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| \`modules/monitoring.bicep\` | Log Analytics workspace, Application Insights | Centralized logging & telemetry |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| \`modules/storage.bicep\` | Storage Account | Function App backing store & deployment packages |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| \`modules/servicebus.bicep\` | Service Bus namespace + queue | Orchestration messaging between agents |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| \`modules/keyvault.bicep\` | Key Vault | Secrets management |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| \`modules/ai-services.bicep\` | Azure AI Services (Cognitive) | LLM and cognitive API access |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| \`modules/ai-hub.bicep\` | Azure AI Foundry Hub | ML workspace hub for agent models |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| \`modules/ai-project.bicep\` | Azure AI Foundry Project | Agent project workspace |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| \`modules/ai-gateway.bicep\` | API Management | Rate limiting, JWT validation, AI gateway |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| \`modules/model-registry.bicep\` | Model Registry | LoRA adapter storage |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| \`modules/a2a-connections.bicep\` | A2A connections | Agent-to-Agent boardroom orchestration |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| \`modules/policy.bicep\` | Azure Policy assignments | Governance: location, HTTPS, KV soft-delete |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| \`modules/budget.bicep\` | Cost Management budget | Monthly spend alerts |" >> "$GITHUB_STEP_SUMMARY"
