@@ -10,3 +10,6 @@ param tags = {
   managedBy: 'bicep'
 }
 param enableGovernancePolicies = false
+// Custom domain binding requires DNS CNAME records to be pre-configured.
+// Leave empty for staging to allow Function Apps to provision without DNS setup.
+param baseDomain = ''

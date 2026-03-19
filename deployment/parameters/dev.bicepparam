@@ -9,3 +9,6 @@ param tags = {
   environment: 'dev'
   managedBy: 'bicep'
 }
+// Custom domain binding requires DNS CNAME records to be pre-configured.
+// Leave empty for dev to allow Function Apps to provision without DNS setup.
+param baseDomain = ''

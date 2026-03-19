@@ -486,10 +486,16 @@ class TestSDKBridge:
     @mock.patch("subprocess.run")
     def test_get_aos_endpoint(self, mock_run: mock.Mock, bridge: SDKBridge) -> None:
         mock_run.return_value = subprocess.CompletedProcess(
-            [], 0, "func-aos-dispatcher-dev.azurewebsites.net\n", ""
+            [], 0, "func-aos-dispatcher-dev-abc123.azurewebsites.net\n", ""
         )
         endpoint = bridge.get_aos_endpoint()
-        assert endpoint == "https://func-aos-dispatcher-dev.azurewebsites.net"
+        assert endpoint == "https://func-aos-dispatcher-dev-abc123.azurewebsites.net"
+        # Verify the command uses `functionapp list` with a prefix filter (not `functionapp show`
+        # with an exact name) because the real name includes a unique suffix.
+        cmd = mock_run.call_args[0][0]
+        assert "list" in cmd
+        assert "starts_with" in " ".join(cmd)
+        assert "func-aos-dispatcher-dev-" in " ".join(cmd)
 
     def test_default_app_names_includes_mcp_servers(self) -> None:
         """All four MCP server submodules must be present in the default app names list."""

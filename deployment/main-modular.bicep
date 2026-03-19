@@ -102,8 +102,8 @@ param mcpServerApps array = [
   { appName: 'mcp-subconscious', githubRepo: 'subconscious.asisaga.com' }
 ]
 
-@description('Base domain used to construct custom hostnames for standard AOS module apps (e.g. asisaga.com produces aos-dispatcher.asisaga.com). MCP server apps use their githubRepo value as the custom domain directly. Set to empty string to disable custom domain setup for all apps.')
-param baseDomain string = 'asisaga.com'
+@description('Base domain used to construct custom hostnames for standard AOS module apps (e.g. asisaga.com produces aos-dispatcher.asisaga.com). MCP server apps use their githubRepo value as the custom domain directly. Set to empty string to disable custom domain setup for all apps. Custom domain binding requires DNS CNAME records to exist before deployment — leave empty until DNS is configured.')
+param baseDomain string = ''
 
 // ====================================================================
 // Variables
