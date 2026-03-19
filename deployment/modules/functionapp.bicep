@@ -69,15 +69,6 @@ param githubRepo string = appName
 @description('Custom domain hostname to bind to this Function App and secure with a free App Service Managed Certificate (e.g. erpnext.asisaga.com or aos-dispatcher.asisaga.com). Requires a DNS CNAME record pointing this domain to the app\'s default azurewebsites.net hostname before deployment — deployment will fail at the hostname binding step if the CNAME is absent. Leave empty to skip custom domain setup entirely.')
 param customDomain string = ''
 
-@description('Azure AI Foundry project discovery URL for Foundry Agent Service orchestration')
-param foundryProjectEndpoint string = ''
-
-@description('AI Gateway (APIM) URL for rate-limited model access')
-param aiGatewayUrl string = ''
-
-@description('Azure AI Services account resource ID for Cognitive Services RBAC')
-param aiServicesAccountId string = ''
-
 // ====================================================================
 // Variables
 // ====================================================================
@@ -97,10 +88,6 @@ var websiteContributorRole = 'de139f84-1756-47ae-9be6-808fbbe84772'
 var keyVaultSecretsUserRole = '4633458b-17de-408a-b874-0445c86b69e6'
 var serviceBusDataSenderRole = '69a216fc-b8fb-44d8-bc22-1f3c2cd27a39'
 var serviceBusDataReceiverRole = '4f6d3b9b-027b-4f4c-9142-0e5a2a2247e0'
-// Cognitive Services User — allows Foundry Agent Service API calls (agent create, thread, run)
-var cognitiveServicesUserRole = 'a97b65f3-24c7-4388-baec-2e87135dc908'
-// Azure AI Developer — allows A2A token exchange between agents in the boardroom
-var azureAIDeveloperRole = '64702f94-c441-49e6-a78b-ef80e0188fee'
 
 // ====================================================================
 // Resources
@@ -240,10 +227,6 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
         { name: 'AZURE_CLIENT_ID', value: userAssignedIdentity.properties.clientId }
         // Peer discovery — URL of the core AOS orchestration hub
         { name: 'AOS_FUNCTION_APP_URL', value: coreAppUrl }
-        // Foundry Agent Service — project endpoint for agent/thread/run lifecycle
-        { name: 'FOUNDRY_PROJECT_ENDPOINT', value: foundryProjectEndpoint }
-        // AI Gateway — APIM URL for rate-limited model access
-        { name: 'AI_GATEWAY_URL', value: aiGatewayUrl }
         // A2A connections — default connection ID for agent-to-agent communication
         { name: 'A2A_CONNECTION_ID_DEFAULT', value: 'a2a-connection-${appName}' }
         // Custom domain — the public hostname bound to this Function App (empty if not configured)
@@ -328,34 +311,6 @@ resource serviceBusReceiverRole 'Microsoft.Authorization/roleAssignments@2022-04
   scope: existingServiceBusNamespace
   properties: {
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', serviceBusDataReceiverRole)
-    principalId: userAssignedIdentity.properties.principalId
-    principalType: 'ServicePrincipal'
-  }
-}
-
-// RBAC — Cognitive Services User on AI Services account (allows Foundry Agent Service API calls)
-// Only created when aiServicesAccountId is provided (i.e. when AI Foundry infrastructure is deployed)
-resource existingAiServicesAccount 'Microsoft.CognitiveServices/accounts@2024-10-01' existing = if (!empty(aiServicesAccountId)) {
-  name: last(split(aiServicesAccountId, '/'))
-}
-
-resource cognitiveServicesUserRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!empty(aiServicesAccountId)) {
-  name: guid(aiServicesAccountId, userAssignedIdentity.id, cognitiveServicesUserRole)
-  scope: existingAiServicesAccount
-  properties: {
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', cognitiveServicesUserRole)
-    principalId: userAssignedIdentity.properties.principalId
-    principalType: 'ServicePrincipal'
-  }
-}
-
-// RBAC — Azure AI Developer on AI Services account (allows A2A token exchange between agents)
-// Required for inter-agent communication in the C-suite boardroom
-resource azureAIDeveloperRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!empty(aiServicesAccountId)) {
-  name: guid(aiServicesAccountId, userAssignedIdentity.id, azureAIDeveloperRole)
-  scope: existingAiServicesAccount
-  properties: {
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', azureAIDeveloperRole)
     principalId: userAssignedIdentity.properties.principalId
     principalType: 'ServicePrincipal'
   }

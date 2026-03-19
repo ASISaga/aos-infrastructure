@@ -115,15 +115,10 @@ var coreAppName = 'agent-operating-system'
 var coreAppUrl = 'https://func-${coreAppName}-${environment}-${take(uniqueSuffix, 6)}.azurewebsites.net'
 
 // Computed URLs — derived from deterministic naming patterns that match the variables in their
-// respective modules. Using computed values instead of module outputs breaks the ARM dependency
-// chain, allowing Function Apps to deploy independently even when the AI Gateway or AI Project
-// module encounters an error.  The URL values are best-effort: if the module did not deploy, the
-// environment variable is set but will not resolve until the module is provisioned.
+// respective modules. Used by the A2A Connections module; not passed to Function Apps.
 var aiGatewayComputedName = 'ai-gw-${projectName}-${environment}-${take(uniqueSuffix, 6)}'
 var aiGatewayComputedUrl = 'https://${aiGatewayComputedName}.azure-api.net'
-// Azure ML workspace discovery URL — pattern: https://<workspace>.<region>.api.azureml.ms
 var aiProjectComputedName = 'ai-project-${projectName}-${environment}-${take(uniqueSuffix, 6)}'
-var foundryProjectEndpointComputed = 'https://${aiProjectComputedName}.${locationML}.api.azureml.ms'
 
 // ====================================================================
 // Modules
@@ -316,11 +311,6 @@ module functionApps 'modules/functionapp.bicep' = [for appName in appNames: {
     coreAppUrl: coreAppUrl
     githubOrg: githubOrg
     githubEnvironment: environment
-    // Foundry Agent Service — project endpoint and AI Gateway URL (computed from deterministic
-    // naming formulas; no hard ARM dependency on the AI Project or AI Gateway modules)
-    foundryProjectEndpoint: foundryProjectEndpointComputed
-    aiGatewayUrl: aiGatewayComputedUrl
-    aiServicesAccountId: aiServices.outputs.accountId
     // Custom domain: <appName>.<baseDomain> (e.g. agent-operating-system.asisaga.com)
     customDomain: !empty(baseDomain) ? '${appName}.${baseDomain}' : ''
   }
@@ -349,11 +339,6 @@ module mcpServerFunctionApps 'modules/functionapp.bicep' = [for mcpApp in mcpSer
     coreAppUrl: coreAppUrl
     githubOrg: githubOrg
     githubEnvironment: environment
-    // Foundry Agent Service — project endpoint and AI Gateway URL (computed from deterministic
-    // naming formulas; no hard ARM dependency on the AI Project or AI Gateway modules)
-    foundryProjectEndpoint: foundryProjectEndpointComputed
-    aiGatewayUrl: aiGatewayComputedUrl
-    aiServicesAccountId: aiServices.outputs.accountId
     // Custom domain: githubRepo IS the full domain for MCP servers (e.g. erpnext.asisaga.com).
     // Conditional on baseDomain being non-empty so that dev/staging environments that set
     // baseDomain='' skip custom domain binding for both standard AOS apps and MCP servers.
