@@ -46,7 +46,7 @@ jobs:
       rg_exists: ${{ steps.rg_check.outputs.exists }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup
         id: setup
@@ -54,7 +54,7 @@ jobs:
 
       - name: Azure Login (OIDC)
         id: login
-        uses: azure/login@v2
+        uses: azure/login@v3
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
@@ -111,7 +111,7 @@ jobs:
 
       - name: Upload diagnostics
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: diagnostics-general
           path: diagnostics.txt
@@ -129,10 +129,10 @@ jobs:
     environment: ${{ inputs.environment }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Azure Login (OIDC)
-        uses: azure/login@v2
+        uses: azure/login@v3
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
@@ -169,9 +169,26 @@ jobs:
           echo "4. Ensure the service principal has sufficient permissions" >> deployment-analysis.txt
           echo "5. Check parameter values in \`deployment/parameters/<env>.bicepparam\`" >> deployment-analysis.txt
 
+      - name: Check source control configuration
+        continue-on-error: true
+        run: |
+          RESOURCE_GROUP="${{ needs.collect-diagnostics.outputs.resource_group }}"
+          echo "" >> deployment-analysis.txt
+          echo "## Source Control (Microsoft.Web/sites/sourcecontrols)" >> deployment-analysis.txt
+          FUNCTION_APPS=$(az functionapp list -g "$RESOURCE_GROUP" --query "[].name" -o tsv 2>/dev/null || echo "")
+          if [[ -n "$FUNCTION_APPS" ]]; then
+            while IFS= read -r APP; do
+              SC=$(az webapp deployment source show -g "$RESOURCE_GROUP" -n "$APP" -o json 2>/dev/null || echo "{}")
+              echo "### $APP" >> deployment-analysis.txt
+              echo "$SC" >> deployment-analysis.txt
+            done <<< "$FUNCTION_APPS"
+          else
+            echo "No Function Apps found in resource group." >> deployment-analysis.txt
+          fi
+
       - name: Upload analysis
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: deployment-failure-analysis
           path: deployment-analysis.txt
@@ -189,10 +206,10 @@ jobs:
     environment: ${{ inputs.environment }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Azure Login (OIDC)
-        uses: azure/login@v2
+        uses: azure/login@v3
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
@@ -231,7 +248,7 @@ jobs:
 
       - name: Upload diagnostics
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: performance-diagnostics
           path: performance-diagnostics.txt
@@ -249,10 +266,10 @@ jobs:
     environment: ${{ inputs.environment }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Azure Login (OIDC)
-        uses: azure/login@v2
+        uses: azure/login@v3
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
@@ -292,7 +309,7 @@ jobs:
 
       - name: Upload diagnostics
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: connectivity-diagnostics
           path: connectivity-diagnostics.txt
@@ -310,10 +327,10 @@ jobs:
     environment: ${{ inputs.environment }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Azure Login (OIDC)
-        uses: azure/login@v2
+        uses: azure/login@v3
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
@@ -345,7 +362,7 @@ jobs:
 
       - name: Upload diagnostics
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: resource-error-diagnostics
           path: resource-diagnostics.txt

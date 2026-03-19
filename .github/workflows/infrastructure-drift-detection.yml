@@ -42,10 +42,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
@@ -54,7 +54,7 @@ jobs:
 
       - name: Azure login
         id: login
-        uses: azure/login@v2
+        uses: azure/login@v3
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
@@ -141,9 +141,28 @@ jobs:
                   print(f"::warning::DR: {finding}")
           EOF
 
+      - name: Source control drift check
+        id: sc_drift
+        continue-on-error: true
+        run: |
+          RESOURCE_GROUP="${{ steps.resolve.outputs.resource_group }}"
+          FUNCTION_APPS=$(az functionapp list -g "$RESOURCE_GROUP" --query "[].name" -o tsv 2>/dev/null || echo "")
+
+          if [[ -n "$FUNCTION_APPS" ]]; then
+            while IFS= read -r APP; do
+              SC_URL=$(az webapp deployment source show \
+                -g "$RESOURCE_GROUP" -n "$APP" --query "repoUrl" -o tsv 2>/dev/null || echo "")
+              if [[ -z "$SC_URL" ]]; then
+                echo "::warning::Drift: Microsoft.Web/sites/sourcecontrols missing on Function App: $APP"
+              else
+                echo "  $APP: source control → $SC_URL"
+              fi
+            done <<< "$FUNCTION_APPS"
+          fi
+
       - name: Upload drift findings
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: drift-findings-${{ steps.resolve.outputs.environment }}
           path: drift-findings.json
@@ -187,4 +206,13 @@ jobs:
             echo "| DR readiness | ❌ failed | Ensure Key Vaults have soft-delete enabled and storage accounts have geo-replication. |" >> "$GITHUB_STEP_SUMMARY"
           else
             echo "| DR readiness | ⏭️ skipped | |" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          # Source control drift
+          if [[ "${{ steps.sc_drift.outcome }}" == "success" ]]; then
+            echo "| Source control drift (sites/sourcecontrols) | ✅ checked | |" >> "$GITHUB_STEP_SUMMARY"
+          elif [[ "${{ steps.sc_drift.outcome }}" == "failure" ]]; then
+            echo "| Source control drift (sites/sourcecontrols) | ❌ failed | One or more Function Apps are missing \`Microsoft.Web/sites/sourcecontrols\`. Re-run the deployment workflow. |" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "| Source control drift (sites/sourcecontrols) | ⏭️ skipped | |" >> "$GITHUB_STEP_SUMMARY"
           fi

@@ -48,10 +48,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
@@ -60,7 +60,7 @@ jobs:
 
       - name: Azure login
         id: login
-        uses: azure/login@v2
+        uses: azure/login@v3
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
@@ -154,6 +154,26 @@ jobs:
               print("::warning::Some policy assignments failed — check logs above")
           EOF
 
+      - name: Source control compliance check
+        id: source_control
+        continue-on-error: true
+        run: |
+          FUNCTION_APPS=$(az functionapp list \
+            --resource-group "${{ steps.resolve.outputs.resource_group }}" \
+            --query "[].name" -o tsv 2>/dev/null || echo "")
+
+          if [[ -n "$FUNCTION_APPS" ]]; then
+            while IFS= read -r APP; do
+              SC_URL=$(az webapp deployment source show \
+                --resource-group "${{ steps.resolve.outputs.resource_group }}" \
+                --name "$APP" \
+                --query "repoUrl" -o tsv 2>/dev/null || echo "")
+              if [[ -z "$SC_URL" ]]; then
+                echo "::warning::Microsoft.Web/sites/sourcecontrols not configured for Function App: $APP"
+              fi
+            done <<< "$FUNCTION_APPS"
+          fi
+
       - name: Governance summary
         if: always()
         run: |
@@ -207,4 +227,13 @@ jobs:
             echo "| Policy assignment | ❌ failed | Ensure the SP has \`Resource Policy Contributor\` on the subscription scope. |" >> "$GITHUB_STEP_SUMMARY"
           else
             echo "| Policy assignment | ⏭️ skipped | Set \`enforce_policies\` to \`true\` to enable. |" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          # Source control compliance
+          if [[ "${{ steps.source_control.outcome }}" == "success" ]]; then
+            echo "| Source control (sites/sourcecontrols) | ✅ configured | |" >> "$GITHUB_STEP_SUMMARY"
+          elif [[ "${{ steps.source_control.outcome }}" == "failure" ]]; then
+            echo "| Source control (sites/sourcecontrols) | ❌ failed | Re-run the deployment workflow to provision \`Microsoft.Web/sites/sourcecontrols\` for all Function Apps. |" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "| Source control (sites/sourcecontrols) | ⏭️ skipped | |" >> "$GITHUB_STEP_SUMMARY"
           fi
