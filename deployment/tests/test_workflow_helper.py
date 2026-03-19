@@ -397,6 +397,41 @@ class TestAnalyzeOutput:
         )
         assert out["is_transient"] == "true", f"Pattern {pattern!r} not detected as transient"
 
+    def test_rbac_permission_error_classified_as_permissions(self, tmp_path):
+        log = tmp_path / "output.log"
+        log.write_text(
+            "ERROR: InvalidTemplateDeployment - Authorization failed for template resource "
+            "of type 'Microsoft.Authorization/roleAssignments'. The client does not have "
+            "permission to perform action 'Microsoft.Authorization/roleAssignments/write'.\n"
+        )
+        out = _capture_outputs(
+            ["analyze-output", "--log-file", str(log), "--exit-code", "1"],
+        )
+        assert out["status"] == "failed"
+        assert out["failure_type"] == "permissions"
+        assert out["should_retry"] == "false"
+        assert out["is_transient"] == "false"
+        assert out["rbac_permission_error"] == "true"
+
+    def test_rbac_permission_error_does_not_trigger_retry(self, tmp_path):
+        log = tmp_path / "output.log"
+        log.write_text(
+            "does not have permission to perform action 'Microsoft.Authorization/roleAssignments/write'\n"
+        )
+        out = _capture_outputs(
+            ["analyze-output", "--log-file", str(log), "--exit-code", "1"],
+        )
+        assert out["should_retry"] == "false"
+        assert out["rbac_permission_error"] == "true"
+
+    def test_success_emits_rbac_permission_error_false(self, tmp_path):
+        log = tmp_path / "output.log"
+        log.write_text("Deployment succeeded.\n")
+        out = _capture_outputs(
+            ["analyze-output", "--log-file", str(log), "--exit-code", "0"],
+        )
+        assert out["rbac_permission_error"] == "false"
+
 
 # ===========================================================================
 # retry
@@ -548,6 +583,36 @@ class TestExtractSummary:
         out = _capture_outputs(["extract-summary", "--audit-dir", str(audit_dir)])
         # Both are iterated; the last successful wins
         assert out["deployed_resources"] == "20"
+
+    def test_emits_what_if_counts_from_audit(self, tmp_path):
+        audit_dir = tmp_path / "audit"
+        audit_dir.mkdir()
+        (audit_dir / "deploy-001.json").write_text(json.dumps({
+            "status": "success",
+            "deployed_resources": 5,
+            "duration": 120,
+            "what_if_creates": 3,
+            "what_if_no_changes": 7,
+            "what_if_modifies": 1,
+            "what_if_deletes": 0,
+        }))
+        out = _capture_outputs(["extract-summary", "--audit-dir", str(audit_dir)])
+        assert out["what_if_creates"] == "3"
+        assert out["what_if_no_changes"] == "7"
+        assert out["what_if_modifies"] == "1"
+        assert out["what_if_deletes"] == "0"
+
+    def test_what_if_counts_default_to_zero_when_absent(self, tmp_path):
+        audit_dir = tmp_path / "audit"
+        audit_dir.mkdir()
+        (audit_dir / "deploy-001.json").write_text(json.dumps({
+            "status": "success",
+            "deployed_resources": 2,
+            "duration": 60,
+        }))
+        out = _capture_outputs(["extract-summary", "--audit-dir", str(audit_dir)])
+        assert out["what_if_creates"] == "0"
+        assert out["what_if_no_changes"] == "0"
 
 
 # ===========================================================================

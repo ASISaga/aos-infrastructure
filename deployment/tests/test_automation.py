@@ -181,6 +181,30 @@ class TestPipelineManager:
         assert pm.what_if() is False
 
     @mock.patch.object(PipelineManager, "_run")
+    def test_what_if_rbac_permission_error_treated_as_warning(
+        self, mock_run: mock.Mock, pm: PipelineManager
+    ) -> None:
+        # RBAC write permission errors during what-if must be treated as a warning,
+        # not a hard failure, so deployment can still proceed.
+        rbac_error = (
+            "ERROR: InvalidTemplateDeployment - Authorization failed for template resource "
+            "'4ba364ab-8231-5eeb-8556-704ba8b5ad9c' of type "
+            "'Microsoft.Authorization/roleAssignments'. The client does not have permission "
+            "to perform action 'Microsoft.Authorization/roleAssignments/write'."
+        )
+        mock_run.return_value = subprocess.CompletedProcess([], 1, "", rbac_error)
+        assert pm.what_if() is True
+
+    @mock.patch.object(PipelineManager, "_run")
+    def test_what_if_rbac_authorization_failed_template_resource(
+        self, mock_run: mock.Mock, pm: PipelineManager
+    ) -> None:
+        # "Authorization failed for template resource" pattern (stderr)
+        rbac_error = "Authorization failed for template resource of type roleAssignments."
+        mock_run.return_value = subprocess.CompletedProcess([], 1, "", rbac_error)
+        assert pm.what_if() is True
+
+    @mock.patch.object(PipelineManager, "_run")
     def test_deploy_success(self, mock_run: mock.Mock, pm: PipelineManager) -> None:
         mock_run.return_value = subprocess.CompletedProcess([], 0, "{}", "")
         assert pm.deploy() is True
