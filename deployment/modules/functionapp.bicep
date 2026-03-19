@@ -328,7 +328,6 @@ resource hostnameBinding 'Microsoft.Web/sites/hostNameBindings@2023-12-01' = if 
   name: customDomain
   properties: {
     sslState: 'Disabled'
-    hostNameType: 'Verified'
   }
 }
 
