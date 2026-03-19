@@ -21,9 +21,6 @@ param uniqueSuffix string
 @description('Resource tags')
 param tags object
 
-@description('Storage account resource ID for registry artefact backing store')
-param storageAccountId string
-
 // ====================================================================
 // Variables
 // ====================================================================
@@ -42,14 +39,15 @@ resource modelRegistry 'Microsoft.MachineLearningServices/registries@2024-10-01'
     type: 'SystemAssigned'
   }
   properties: {
-    description: 'AOS LoRA Adapter Registry — stores fine-tuned adapter assets for ${projectName} (${environment})'
     publicNetworkAccess: environment == 'prod' ? 'Disabled' : 'Enabled'
     regionDetails: [
       {
         location: location
-        storageConfig: {
-          storageAccountHnsEnabled: false
-        }
+        storageAccountDetails: [
+          {
+            storageAccountHnsEnabled: false
+          }
+        ]
       }
     ]
   }

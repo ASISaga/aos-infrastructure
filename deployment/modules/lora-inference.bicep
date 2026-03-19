@@ -63,7 +63,8 @@ resource llamaEndpoint 'Microsoft.MachineLearningServices/workspaces/onlineEndpo
 // ====================================================================
 
 resource llamaDeployment 'Microsoft.MachineLearningServices/workspaces/onlineEndpoints/deployments@2024-10-01' = {
-  name: '${split(hubId, '/')[8]}/${endpointName}/${deploymentName}'
+  parent: llamaEndpoint
+  name: deploymentName
   location: location
   tags: tags
   sku: {
@@ -90,9 +91,6 @@ resource llamaDeployment 'Microsoft.MachineLearningServices/workspaces/onlineEnd
       adapterName: '${appName}-lora-adapter'
     }
   }
-  dependsOn: [
-    llamaEndpoint
-  ]
 }
 
 // ====================================================================

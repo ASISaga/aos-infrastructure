@@ -4,9 +4,6 @@
 @description('Deployment environment (dev, staging, prod)')
 param environment string
 
-@description('Azure region for the deployment')
-param location string
-
 @description('List of allowed Azure locations for resources')
 param allowedLocations array = [
   'eastus'
@@ -15,12 +12,6 @@ param allowedLocations array = [
   'westeurope'
   'northeurope'
 ]
-
-@description('Required resource tags enforced by policy')
-param requiredTags object = {
-  environment: environment
-  managedBy: 'aos-infrastructure'
-}
 
 // ── Built-in policy definition IDs ──────────────────────────────────────────
 var policyAllowedLocations = 'e56962a6-4747-49cd-b67b-bf8b01975c4c'
