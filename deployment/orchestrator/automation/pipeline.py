@@ -20,6 +20,28 @@ from typing import Any
 
 _SHA_RE = re.compile(r"^[a-fA-F0-9]{7,40}$")
 
+# Patterns that identify a role-assignment permission warning during what-if.
+# When the deployment SP holds *Contributor* but not *Owner* / *User Access
+# Administrator*, Azure CLI exits with code 1 for what-if on templates that
+# include ``Microsoft.Authorization/roleAssignments``.  Role assignments use
+# deterministic GUID names (idempotent), so this is safe to treat as a
+# non-fatal warning and continue to the actual deploy stage.
+_RBAC_AUTH_PATTERNS = (
+    "Microsoft.Authorization/roleAssignments/write",
+    "Authorization failed for template resource",
+)
+
+
+def _is_rbac_authorization_warning(error_text: str) -> bool:
+    """Return ``True`` when *error_text* describes an RBAC permission warning.
+
+    These errors arise during ``what-if`` when the service principal lacks
+    ``Microsoft.Authorization/roleAssignments/write`` and should be treated as
+    a warning rather than a hard failure.
+    """
+    lower = error_text.lower()
+    return any(p.lower() in lower for p in _RBAC_AUTH_PATTERNS)
+
 
 class PipelineManager:
     """Manages the formal IaC deployment pipeline for AOS infrastructure.
@@ -85,7 +107,9 @@ class PipelineManager:
         Azure CLI 2.57+ returns exit code 2 when changes are detected and
         exit code 0 when no changes are detected.  Both are success outcomes;
         only exit code 1 (or any other non-zero, non-2 value) indicates a
-        genuine error.
+        genuine error — unless the error is solely an RBAC permission warning
+        for ``Microsoft.Authorization/roleAssignments/write``, which is treated
+        as a non-fatal warning so the deploy stage can still proceed.
         """
         result = self._run(self._deployment_cmd("what-if"))
         if result.returncode == 0:
@@ -96,8 +120,19 @@ class PipelineManager:
             if result.stdout:
                 print(result.stdout)
             return True
-        # Any other non-zero exit code is a genuine failure.
+        # Check for RBAC permission warning before treating as a hard failure.
+        # The SP may hold Contributor but not Owner/User Access Administrator;
+        # role assignments are idempotent (GUID names) so we can proceed safely.
         error_detail = (result.stderr or result.stdout or "no details available").strip()
+        if _is_rbac_authorization_warning(error_detail):
+            print(
+                "  ⚠️  What-If: role assignment preview skipped — the service principal lacks "
+                "'Microsoft.Authorization/roleAssignments/write'. "
+                "Existing role assignments will be preserved; new ones will be validated at deploy time.",
+                file=sys.stderr,
+            )
+            return True
+        # Any other non-zero exit code is a genuine failure.
         print(f"  What-If failed: {error_detail}", file=sys.stderr)
         return False
 

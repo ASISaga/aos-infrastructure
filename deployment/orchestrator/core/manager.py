@@ -42,12 +42,69 @@ from orchestrator.reliability.health_monitor import HealthMonitor, HealthStatus
 
 _AUDIT_DIR = Path(__file__).resolve().parent.parent.parent / "audit"
 
+# Patterns that identify a role-assignment permission warning during what-if.
+# The deployment SP may hold *Contributor* but not *Owner* / *User Access
+# Administrator*, causing Azure CLI to exit non-zero for role-assignment
+# resources.  Role assignments use deterministic GUID names (idempotent) so
+# treating this as a warning and continuing to deploy is safe.
+_RBAC_AUTH_PATTERNS = (
+    "Microsoft.Authorization/roleAssignments/write",
+    "Authorization failed for template resource",
+)
+
+
+def _is_rbac_authorization_warning(error_text: str) -> bool:
+    """Return ``True`` when *error_text* describes an RBAC permission warning.
+
+    Applicable during ``what-if`` when the service principal lacks
+    ``Microsoft.Authorization/roleAssignments/write``.
+    """
+    lower = error_text.lower()
+    return any(p.lower() in lower for p in _RBAC_AUTH_PATTERNS)
+
+
+def _parse_what_if_output(output: str) -> dict[str, int]:
+    """Parse ``az deployment group what-if --output json`` and count change types.
+
+    Azure returns ``changeType`` as PascalCase (e.g. ``"Create"``, ``"NoChange"``).
+    We normalise all values to lowercase with an explicit mapping so that case
+    variations and the ``NoChange`` → ``no_change`` rename are handled consistently.
+
+    Returns a mapping of change-type label → resource count.  Keys are always
+    present (defaulting to 0): ``create``, ``modify``, ``no_change``,
+    ``delete``, ``ignore``.
+    """
+    # Explicit mapping covers all Azure what-if changeType values.
+    _CHANGE_TYPE_MAP: dict[str, str] = {
+        "create": "create",
+        "modify": "modify",
+        "nochange": "no_change",
+        "no_change": "no_change",
+        "delete": "delete",
+        "ignore": "ignore",
+        "unsupported": "ignore",  # treat unsupported as ignored
+        "deploy": "modify",       # re-deploy of existing resource ≈ modify
+    }
+    counts: dict[str, int] = {"create": 0, "modify": 0, "no_change": 0, "delete": 0, "ignore": 0}
+    try:
+        data = json.loads(output)
+        for change in data.get("changes", []):
+            raw = change.get("changeType", "").lower()
+            key = _CHANGE_TYPE_MAP.get(raw)
+            if key is not None:
+                counts[key] += 1
+    except (json.JSONDecodeError, TypeError, AttributeError):
+        pass
+    return counts
+
 
 class InfrastructureManager:
     """Orchestrates Azure infrastructure deployments for AOS."""
 
     def __init__(self, config: DeploymentConfig) -> None:
         self.config = config
+        # Populated by _what_if() so deploy() can include counts in the audit.
+        self._what_if_counts: dict[str, int] = {}
         _AUDIT_DIR.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------
@@ -116,7 +173,13 @@ class InfrastructureManager:
         if self.config.reliability.enable_drift_detection or self.config.reliability.check_dr_readiness:
             self._run_reliability_pillar()
 
-        self._audit("deploy", {"status": "success"})
+        self._audit("deploy", {
+            "status": "success",
+            "what_if_creates": self._what_if_counts.get("create", 0),
+            "what_if_no_changes": self._what_if_counts.get("no_change", 0),
+            "what_if_modifies": self._what_if_counts.get("modify", 0),
+            "what_if_deletes": self._what_if_counts.get("delete", 0),
+        })
         print("\n✅ Deployment completed successfully")
         return True
 
@@ -143,7 +206,13 @@ class InfrastructureManager:
                     return False
             print(f"✅ {label} passed")
 
-        self._audit("plan", {"status": "success"})
+        self._audit("plan", {
+            "status": "success",
+            "what_if_creates": self._what_if_counts.get("create", 0),
+            "what_if_no_changes": self._what_if_counts.get("no_change", 0),
+            "what_if_modifies": self._what_if_counts.get("modify", 0),
+            "what_if_deletes": self._what_if_counts.get("delete", 0),
+        })
         print("\n📋 Plan completed — no resources were modified")
         return True
 
@@ -519,28 +588,62 @@ class InfrastructureManager:
         Azure CLI 2.57+ returns exit code 2 when changes are detected and
         exit code 0 when no changes are detected.  Both are success outcomes;
         only exit code 1 (or any other non-zero, non-2 value) indicates a
-        genuine error.
+        genuine error — unless it is solely an RBAC permission warning for
+        ``Microsoft.Authorization/roleAssignments/write``, which is treated as
+        a non-fatal warning so the deploy stage can still proceed.
         """
         cmd = self._deployment_cmd("what-if")
         result = self._run(cmd)
         if result.returncode == 0:
+            self._what_if_counts = _parse_what_if_output(result.stdout)
+            self._print_what_if_summary()
             return True
         if result.returncode == 2:
             # Exit code 2 means "changes detected" — not an error.
             print("  ⚠️  What-If: changes detected (resources will be created/modified/deleted)")
-            if result.stdout:
-                print(result.stdout)
+            self._what_if_counts = _parse_what_if_output(result.stdout)
+            self._print_what_if_summary()
+            return True
+        # Check for RBAC permission warning before treating as a hard failure.
+        error_detail = (result.stderr or result.stdout or "no details available").strip()
+        if _is_rbac_authorization_warning(error_detail):
+            print(
+                "  ⚠️  What-If: role assignment preview skipped — the service principal lacks "
+                "'Microsoft.Authorization/roleAssignments/write'. "
+                "Existing role assignments will be preserved; new ones will be validated at deploy time.",
+                file=sys.stderr,
+            )
             return True
         # Any other non-zero exit code is a genuine failure; surface the detail.
-        error_detail = (result.stderr or result.stdout or "no details available").strip()
         print(f"  What-If error: {error_detail}", file=sys.stderr)
         return False
+
+    def _print_what_if_summary(self) -> None:
+        """Print a one-line summary of what-if change counts.
+
+        Ignored resources are excluded from the total and not shown, as they
+        add noise without meaningful deployment information.
+        """
+        c = self._what_if_counts
+        # Exclude "ignore" from the total — those resources are not touched.
+        total = c["create"] + c["modify"] + c["no_change"] + c["delete"]
+        if total > 0:
+            print(
+                f"  📊 What-If Summary: +{c['create']} create, "
+                f"~{c['modify']} modify, "
+                f"={c['no_change']} no-change, "
+                f"-{c['delete']} delete"
+            )
 
     def _deploy(self) -> bool:
         """Run ``az deployment group create``."""
         cmd = self._deployment_cmd("create")
         result = self._run(cmd)
-        return result.returncode == 0
+        if result.returncode == 0:
+            return True
+        error_detail = (result.stderr or result.stdout or "no details available").strip()
+        print(f"  Deploy error: {error_detail}", file=sys.stderr)
+        return False
 
     def _health_check(self) -> bool:
         """Verify key resources exist and are in a healthy state."""

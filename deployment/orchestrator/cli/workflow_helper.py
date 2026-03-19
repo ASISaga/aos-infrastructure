@@ -155,6 +155,15 @@ _TRANSIENT_PATTERNS = [
     "could not resolve host",
 ]
 
+# Patterns that signal an RBAC permission failure (insufficient privileges to
+# write role assignments).  These are not transient and not auto-fixable; they
+# require manual intervention (granting the SP Owner / User Access Administrator).
+_RBAC_PERMISSION_PATTERNS = [
+    "Microsoft.Authorization/roleAssignments/write",
+    "Authorization failed for template resource",
+    "does not have permission to perform action 'Microsoft.Authorization",
+]
+
 
 def _analyze_output(args: argparse.Namespace) -> None:
     """Classify deployment outcome from the orchestrator log."""
@@ -170,15 +179,26 @@ def _analyze_output(args: argparse.Namespace) -> None:
         _output("failure_type", "")
         _output("should_retry", "false")
         _output("is_transient", "false")
+        _output("rbac_permission_error", "false")
         return
 
     is_transient = any(p.lower() in log_text.lower() for p in _TRANSIENT_PATTERNS)
-    failure_type = "environmental" if is_transient else "logic"
+    is_rbac_permission = any(p.lower() in log_text.lower() for p in _RBAC_PERMISSION_PATTERNS)
+
+    if is_transient:
+        failure_type = "environmental"
+    elif is_rbac_permission:
+        # RBAC permission errors are not transient and not logic errors;
+        # they require granting the SP additional Azure RBAC roles.
+        failure_type = "permissions"
+    else:
+        failure_type = "logic"
 
     _output("status", "failed")
     _output("failure_type", failure_type)
     _output("should_retry", str(is_transient).lower())
     _output("is_transient", str(is_transient).lower())
+    _output("rbac_permission_error", str(is_rbac_permission).lower())
 
     # Persist error message for downstream steps (capped at 4 KB)
     error_file = "error-message.txt"
@@ -232,23 +252,43 @@ def _retry(args: argparse.Namespace) -> None:
 
 
 def _extract_summary(args: argparse.Namespace) -> None:
-    """Read audit logs and emit summary outputs."""
+    """Read audit logs and emit summary outputs.
+
+    Iterates all ``*.json`` files in *audit_dir* in sorted order; the last
+    successful entry wins for each field (later files override earlier ones).
+    """
     audit_dir = Path(getattr(args, "audit_dir", "deployment/audit"))
+
+    # Final values — updated whenever a successful audit entry is found.
     deployed_resources = 0
     duration = "N/A"
+    what_if_creates = 0
+    what_if_no_changes = 0
+    what_if_modifies = 0
+    what_if_deletes = 0
 
     if audit_dir.exists():
         for f in sorted(audit_dir.glob("*.json")):
             try:
                 data = json.loads(f.read_text())
-                if data.get("status") == "success":
-                    deployed_resources = data.get("deployed_resources", 0)
-                    duration = data.get("duration", "N/A")
+                if data.get("status") != "success":
+                    continue
+                # Overwrite with this entry's values; last successful entry wins.
+                deployed_resources = data.get("deployed_resources", deployed_resources)
+                duration = data.get("duration", duration)
+                what_if_creates = data.get("what_if_creates", what_if_creates)
+                what_if_no_changes = data.get("what_if_no_changes", what_if_no_changes)
+                what_if_modifies = data.get("what_if_modifies", what_if_modifies)
+                what_if_deletes = data.get("what_if_deletes", what_if_deletes)
             except (json.JSONDecodeError, OSError):
                 continue
 
     _output("deployed_resources", str(deployed_resources))
     _output("duration", str(duration))
+    _output("what_if_creates", str(what_if_creates))
+    _output("what_if_no_changes", str(what_if_no_changes))
+    _output("what_if_modifies", str(what_if_modifies))
+    _output("what_if_deletes", str(what_if_deletes))
 
 
 # ------------------------------------------------------------------

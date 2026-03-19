@@ -381,12 +381,19 @@ jobs:
           script: |
             const status = '${{ steps.analyze.outputs.status }}';
             const failureType = '${{ steps.analyze.outputs.failure_type }}';
+            const rbacPermissionError = '${{ steps.analyze.outputs.rbac_permission_error }}' === 'true';
             const retrySuccess = '${{ steps.retry.outputs.retry_success }}';
             const retryCount = '${{ steps.retry.outputs.retry_count }}';
             const fixSuccess = '${{ steps.fix_logic_error.outputs.fix_success }}';
             const fixRetrySuccess = '${{ steps.fix_logic_error.outputs.retry_success }}';
             const environment = '${{ needs.setup.outputs.environment }}';
             const isDryRun = '${{ needs.setup.outputs.is_dry_run }}' === 'true';
+            
+            // Resource change counts from what-if analysis
+            const whatIfCreates   = parseInt('${{ steps.summary.outputs.what_if_creates }}')   || 0;
+            const whatIfNoChanges = parseInt('${{ steps.summary.outputs.what_if_no_changes }}') || 0;
+            const whatIfModifies  = parseInt('${{ steps.summary.outputs.what_if_modifies }}')   || 0;
+            const whatIfDeletes   = parseInt('${{ steps.summary.outputs.what_if_deletes }}')    || 0;
             
             let emoji = '❓';
             let statusText = 'Unknown';
@@ -417,7 +424,11 @@ jobs:
               emoji = '❌';
               statusText = 'Failed';
               
-              if (failureType === 'logic') {
+              if (failureType === 'permissions' || rbacPermissionError) {
+                const spClientId = '${{ secrets.AZURE_CLIENT_ID }}';
+                const resourceGroup = '${{ needs.setup.outputs.resource_group }}';
+                details = `\n\n**Failure Type**: RBAC Permissions\n**Action Required**: The deployment service principal (\`${spClientId}\`) lacks \`Microsoft.Authorization/roleAssignments/write\`.\n\nGrant the SP the **User Access Administrator** or **Owner** role on the target resource group:\n\`\`\`bash\naz role assignment create \\\\\n  --assignee "${spClientId}" \\\\\n  --role "User Access Administrator" \\\\\n  --resource-group "${resourceGroup}"\n\`\`\`\n\n⚠️ This is a permissions issue that requires manual intervention.`;
+              } else if (failureType === 'logic') {
                 if (fixSuccess === 'false') {
                   details = `\n\n**Failure Type**: Logic Error (Code/Template)\n**Autonomous Fix**: Attempted but failed\n**Action Required**: The agent could not automatically fix this error. Please review the logs and fix manually.\n\n⚠️ This is a code error that requires manual intervention.`;
                 } else {
@@ -434,6 +445,16 @@ jobs:
               }
             }
             
+            // Build what-if resource summary section
+            let resourceSummary = '';
+            if (whatIfCreates + whatIfNoChanges + whatIfModifies + whatIfDeletes > 0) {
+              resourceSummary = `\n\n### 📊 Resource Change Preview (What-If)\n`;
+              if (whatIfCreates   > 0) resourceSummary += `- ✅ **To provision** (create): ${whatIfCreates}\n`;
+              if (whatIfNoChanges > 0) resourceSummary += `- 📦 **Already provisioned** (no change): ${whatIfNoChanges}\n`;
+              if (whatIfModifies  > 0) resourceSummary += `- 🔄 **To update** (modify): ${whatIfModifies}\n`;
+              if (whatIfDeletes   > 0) resourceSummary += `- 🗑️ **To remove** (delete): ${whatIfDeletes}\n`;
+            }
+            
             const mode = isDryRun ? 'Plan/Analysis' : 'Deployment';
             
             const body = `## ${emoji} Infrastructure ${mode} ${statusText}
@@ -444,7 +465,7 @@ jobs:
             **Azure ML Region**: \`${{ steps.region_select.outputs.ml_region }}\`
             **Status**: ${statusText}
             ${details}
-            
+            ${resourceSummary}
             ${isDryRun ? '📊 This was a **plan/dry-run** - no actual infrastructure changes were made.' : ''}
             
             [View workflow run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
@@ -477,6 +498,7 @@ jobs:
           STATUS="${{ steps.analyze.outputs.status }}"
           RETRY_SUCCESS="${{ steps.retry.outputs.retry_success }}"
           FIX_RETRY_SUCCESS="${{ steps.fix_logic_error.outputs.retry_success }}"
+          FAILURE_TYPE="${{ steps.analyze.outputs.failure_type }}"
           
           if [[ "$STATUS" == "success" ]] || [[ "$RETRY_SUCCESS" == "true" ]] || [[ "$FIX_RETRY_SUCCESS" == "true" ]]; then
             echo "✅ Deployment workflow completed successfully"
@@ -484,7 +506,13 @@ jobs:
           elif [[ "${{ needs.setup.outputs.is_dry_run }}" == "true" ]]; then
             echo "📊 Plan/dry-run completed"
             exit 0
+          elif [[ "$FAILURE_TYPE" == "permissions" ]]; then
+            echo "❌ Deployment failed: RBAC permissions error"
+            echo "   Grant the service principal 'User Access Administrator' or 'Owner' role"
+            echo "   on resource group '${{ needs.setup.outputs.resource_group }}' to allow"
+            echo "   Microsoft.Authorization/roleAssignments/write."
+            exit 1
           else
-            echo "❌ Deployment workflow failed"
+            echo "❌ Deployment workflow failed (failure_type=${FAILURE_TYPE})"
             exit 1
           fi

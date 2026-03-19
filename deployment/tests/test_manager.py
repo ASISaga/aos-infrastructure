@@ -155,6 +155,43 @@ class TestInfrastructureManager:
         assert manager._what_if() is False
 
     @mock.patch.object(InfrastructureManager, "_run")
+    def test_what_if_rbac_permission_error_treated_as_warning(
+        self, mock_run: mock.Mock, manager: InfrastructureManager
+    ) -> None:
+        # SP lacks Microsoft.Authorization/roleAssignments/write — what-if must not abort the pipeline.
+        rbac_error = (
+            "ERROR: InvalidTemplateDeployment - Authorization failed for template resource "
+            "of type 'Microsoft.Authorization/roleAssignments'. The client does not have "
+            "permission to perform action 'Microsoft.Authorization/roleAssignments/write'."
+        )
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr=rbac_error,
+        )
+        assert manager._what_if() is True
+
+    @mock.patch.object(InfrastructureManager, "_run")
+    def test_what_if_parses_json_change_counts(
+        self, mock_run: mock.Mock, manager: InfrastructureManager
+    ) -> None:
+        # Ensure change counts are captured in _what_if_counts for the audit log.
+        what_if_json = json.dumps({
+            "changes": [
+                {"changeType": "Create", "resourceId": "/subs/.../r1"},
+                {"changeType": "Create", "resourceId": "/subs/.../r2"},
+                {"changeType": "NoChange", "resourceId": "/subs/.../r3"},
+                {"changeType": "Modify", "resourceId": "/subs/.../r4"},
+            ]
+        })
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=what_if_json, stderr="",
+        )
+        result = manager._what_if()
+        assert result is True
+        assert manager._what_if_counts["create"] == 2
+        assert manager._what_if_counts["no_change"] == 1
+        assert manager._what_if_counts["modify"] == 1
+
+    @mock.patch.object(InfrastructureManager, "_run")
     def test_deploy_whatif_exit_code_2_does_not_abort(
         self, mock_run: mock.Mock, manager: InfrastructureManager
     ) -> None:
