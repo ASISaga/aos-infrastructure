@@ -203,7 +203,6 @@ module aiProject 'modules/ai-project.bicep' = {
     uniqueSuffix: uniqueSuffix
     tags: tags
     hubId: aiHub.outputs.hubId
-    aiServicesAccountId: aiServices.outputs.accountId
   }
 }
 
@@ -216,7 +215,6 @@ module modelRegistry 'modules/model-registry.bicep' = {
     projectName: projectName
     uniqueSuffix: uniqueSuffix
     tags: tags
-    storageAccountId: storage.outputs.storageAccountId
   }
 }
 
@@ -281,11 +279,8 @@ module aiGateway 'modules/ai-gateway.bicep' = {
 module a2aConnections 'modules/a2a-connections.bicep' = {
   name: 'a2a-connections-${suffix}'
   params: {
-    location: locationML
     environment: environment
     projectName: projectName
-    uniqueSuffix: uniqueSuffix
-    tags: tags
     aiProjectName: aiProject.outputs.projectName
     aiGatewayUrl: aiGateway.outputs.gatewayUrl
   }
@@ -359,7 +354,6 @@ module governancePolicy 'modules/policy.bicep' = if (enableGovernancePolicies) {
   name: 'governance-policy-${suffix}'
   params: {
     environment: environment
-    location: location
     allowedLocations: governanceAllowedLocations
   }
 }

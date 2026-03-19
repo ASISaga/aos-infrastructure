@@ -8,21 +8,12 @@
 // All A2A traffic routes through the Foundry Private Link substrate — no
 // public endpoint communication is permitted (Zero-Trust).
 
-@description('Azure region')
-param location string
-
 @description('Deployment environment')
 @allowed(['dev', 'staging', 'prod'])
 param environment string
 
 @description('Base project name')
 param projectName string
-
-@description('Unique suffix for globally unique names')
-param uniqueSuffix string
-
-@description('Resource tags')
-param tags object
 
 @description('AI Foundry Project resource name — parent workspace for A2A connections')
 param aiProjectName string

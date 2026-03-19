@@ -22,9 +22,6 @@ param tags object
 @description('AI Foundry Hub resource ID (parent workspace)')
 param hubId string
 
-@description('AI Services account resource ID — used to assign Cognitive Services User role')
-param aiServicesAccountId string
-
 // ====================================================================
 // Variables
 // ====================================================================

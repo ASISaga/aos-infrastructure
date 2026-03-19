@@ -37,7 +37,8 @@ var publisherName = projectName
 var publisherEmail = 'noreply@${projectName}.io'
 
 // Rate-limit policy — tokens-per-minute throttling to protect backend AI Services
-var rateLimitPolicy = '''<policies>
+// The OpenID config URL uses environment().authentication.loginEndpoint for cloud compatibility.
+var rateLimitPolicyTemplate = '''<policies>
   <inbound>
     <base />
     <rate-limit-by-key calls="60" renewal-period="60"
@@ -46,7 +47,7 @@ var rateLimitPolicy = '''<policies>
       total-calls-header-name="x-ratelimit-limit" />
     <validate-jwt header-name="Authorization" failed-validation-httpcode="401" require-scheme="Bearer">
       <!-- Configure issuer and audience per tenant; stub shown for illustrative purposes -->
-      <openid-config url="https://login.microsoftonline.com/common/v2.0/.well-known/openid-configuration" />
+      <openid-config url="{LOGIN_ENDPOINT}common/v2.0/.well-known/openid-configuration" />
     </validate-jwt>
     <set-header name="api-key" exists-action="delete" />
     <set-backend-service base-url="{0}" />
@@ -61,6 +62,7 @@ var rateLimitPolicy = '''<policies>
     <base />
   </on-error>
 </policies>'''
+var rateLimitPolicy = replace(rateLimitPolicyTemplate, '{LOGIN_ENDPOINT}', environment().authentication.loginEndpoint)
 
 // ====================================================================
 // Resources

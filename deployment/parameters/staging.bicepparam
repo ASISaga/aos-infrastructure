@@ -9,3 +9,4 @@ param tags = {
   environment: 'staging'
   managedBy: 'bicep'
 }
+param enableGovernancePolicies = false

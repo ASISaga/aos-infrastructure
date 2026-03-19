@@ -79,7 +79,8 @@ resource endpoint 'Microsoft.MachineLearningServices/workspaces/onlineEndpoints@
 // ====================================================================
 
 resource agentDeployment 'Microsoft.MachineLearningServices/workspaces/onlineEndpoints/deployments@2024-10-01' = {
-  name: '${split(hubId, '/')[8]}/${endpointName}/${deploymentName}'
+  parent: endpoint
+  name: deploymentName
   location: location
   tags: tags
   sku: {
@@ -101,9 +102,6 @@ resource agentDeployment 'Microsoft.MachineLearningServices/workspaces/onlineEnd
       loraInferenceEndpointName: loraInferenceEndpointName
     }
   }
-  dependsOn: [
-    endpoint
-  ]
 }
 
 // ====================================================================
@@ -116,6 +114,7 @@ output scoringUri string = endpoint.properties.scoringUri
 output endpointId string = endpoint.id
 
 // Nested deployment for Agent Service resources (user-supplied template)
+#disable-next-line no-deployments-resources
 resource agentTemplateDeployment 'Microsoft.Resources/deployments@2021-04-01' = if (useNestedDeployment) {
   name: '${appName}-agent-template'
   properties: {
@@ -126,4 +125,4 @@ resource agentTemplateDeployment 'Microsoft.Resources/deployments@2021-04-01' = 
 }
 
 output agentTemplateDeploymentName string = useNestedDeployment ? '${appName}-agent-template' : ''
-output agentTemplateDeploymentOutputs object = useNestedDeployment ? (agentTemplateDeployment.properties.outputs ?? {}) : {}
+output agentTemplateDeploymentOutputs object = useNestedDeployment ? (agentTemplateDeployment!.properties.outputs ?? {}) : {}

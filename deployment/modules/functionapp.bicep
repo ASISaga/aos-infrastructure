@@ -196,7 +196,7 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
       deployment: {
         storage: {
           type: 'blobContainer'
-          value: 'https://${storageAccountName}.blob.core.windows.net/${deploymentContainerName}'
+          value: 'https://${storageAccountName}.blob.${environment().suffixes.storage}/${deploymentContainerName}'
           authentication: {
             type: 'UserAssignedIdentity'
             userAssignedIdentityResourceId: userAssignedIdentity.id
@@ -222,7 +222,7 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
       // Identity-based connections only — no connection strings or secrets
       appSettings: [
         { name: 'AzureWebJobsStorage__accountName', value: storageAccountName }
-        { name: 'AzureWebJobsStorage__blobServiceUri', value: 'https://${storageAccountName}.blob.core.windows.net' }
+        { name: 'AzureWebJobsStorage__blobServiceUri', value: 'https://${storageAccountName}.blob.${environment().suffixes.storage}' }
         { name: 'AzureWebJobsStorage__credential', value: 'managedidentity' }
         { name: 'AzureWebJobsStorage__clientId', value: userAssignedIdentity.properties.clientId }
         { name: 'FUNCTIONS_EXTENSION_VERSION', value: '~4' }
@@ -235,7 +235,7 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
         { name: 'AosStateStore__tableServiceUri', value: tableServiceUri }
         { name: 'AosStateStore__credential', value: 'managedidentity' }
         { name: 'AosStateStore__clientId', value: userAssignedIdentity.properties.clientId }
-        { name: 'KEY_VAULT_URI', value: 'https://${keyVaultName}.vault.azure.net/' }
+        { name: 'KEY_VAULT_URI', value: 'https://${keyVaultName}.${environment().suffixes.keyvaultDns}/' }
         { name: 'ENVIRONMENT', value: environment }
         { name: 'AZURE_CLIENT_ID', value: userAssignedIdentity.properties.clientId }
         // Peer discovery — URL of the core AOS orchestration hub
@@ -397,7 +397,7 @@ module sslBinding 'functionapp-ssl.bicep' = if (!empty(customDomain)) {
   params: {
     functionAppName: functionApp.name
     customDomain: customDomain
-    thumbprint: managedCertificate.properties.thumbprint
+    thumbprint: managedCertificate!.properties.thumbprint
   }
 }
 
