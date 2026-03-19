@@ -402,24 +402,6 @@ module sslBinding 'functionapp-ssl.bicep' = if (!empty(customDomain)) {
 }
 
 // ====================================================================
-// Source Control Link
-// ====================================================================
-// Records the GitHub repository that deploys code to this Function App.
-// Deployment is managed by GitHub Actions (OIDC + ZIP deploy via storage blob),
-// so isManualIntegration is set to true to prevent Kudu from auto-deploying on push.
-resource sourceControl 'Microsoft.Web/sites/sourcecontrols@2023-12-01' = {
-  parent: functionApp
-  name: 'web'
-  properties: {
-    repoUrl: 'https://github.com/${githubOrg}/${githubRepo}'
-    branch: 'main'
-    isManualIntegration: true
-    isGitHubAction: false
-    deploymentRollbackEnabled: false
-  }
-}
-
-// ====================================================================
 // Outputs
 // ====================================================================
 
@@ -430,4 +412,6 @@ output principalId string = userAssignedIdentity.properties.principalId
 output clientId string = userAssignedIdentity.properties.clientId
 output customDomain string = customDomain
 output customDomainUrl string = !empty(customDomain) ? 'https://${customDomain}' : ''
-output sourceControlRepoUrl string = sourceControl.properties.repoUrl
+// GitHub repository URL — computed from parameters (source control via the sourcecontrols ARM resource
+// is not supported for Flex Consumption plans; code is deployed via blob storage).
+output sourceControlRepoUrl string = 'https://github.com/${githubOrg}/${githubRepo}'

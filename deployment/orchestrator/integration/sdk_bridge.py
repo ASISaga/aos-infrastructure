@@ -197,14 +197,15 @@ class SDKBridge:
     def get_aos_endpoint(self) -> Optional[str]:
         """Discover the AOS dispatcher endpoint from the live resource group.
 
-        Queries the ``aos-dispatcher`` Function App hostname.
+        Queries the ``aos-dispatcher`` Function App by its naming prefix
+        (``func-aos-dispatcher-{environment}-*``) because the full name includes
+        a unique suffix derived from the resource group ID at deploy time.
         """
         result = subprocess.run(  # noqa: S603
             [
-                "az", "functionapp", "show",
+                "az", "functionapp", "list",
                 "--resource-group", self.resource_group,
-                "--name", f"func-aos-dispatcher-{self.environment}",
-                "--query", "defaultHostName",
+                "--query", f"[?starts_with(name, 'func-aos-dispatcher-{self.environment}-')].defaultHostName | [0]",
                 "--output", "tsv",
             ],
             capture_output=True, text=True,
