@@ -344,30 +344,7 @@ jobs:
           echo "| Resource | Type | Location | Bicep Module |" >> "$GITHUB_STEP_SUMMARY"
           echo "|----------|------|----------|-------------|" >> "$GITHUB_STEP_SUMMARY"
 
-          echo "$RESOURCES" | python3 -c "
-          import json, sys
-          resources = json.load(sys.stdin)
-          # Map Azure resource types to Bicep module files
-          MODULE_MAP = {
-              'microsoft.operationalinsights/workspaces': 'modules/monitoring.bicep',
-              'microsoft.insights/components': 'modules/monitoring.bicep',
-              'microsoft.storage/storageaccounts': 'modules/storage.bicep',
-              'microsoft.servicebus/namespaces': 'modules/servicebus.bicep',
-              'microsoft.keyvault/vaults': 'modules/keyvault.bicep',
-              'microsoft.cognitiveservices/accounts': 'modules/ai-services.bicep',
-              'microsoft.machinelearningservices/workspaces': 'modules/ai-hub.bicep or ai-project.bicep',
-              'microsoft.apimanagement/service': 'modules/ai-gateway.bicep',
-              'microsoft.web/sites': 'modules/functionapp.bicep',
-              'microsoft.web/serverfarms': 'modules/functionapp.bicep',
-              'microsoft.managedidentity/userassignedidentities': 'modules/identity.bicep (via functionapp.bicep)',
-              'microsoft.machinelearningservices/registries': 'modules/model-registry.bicep',
-              'microsoft.insights/actiongroups': 'modules/monitoring.bicep',
-              'microsoft.authorization/policyassignments': 'modules/policy.bicep',
-              'microsoft.consumption/budgets': 'modules/budget.bicep',
-          }
-          for r in sorted(resources, key=lambda x: x['type']):
-              mod = MODULE_MAP.get(r['type'].lower(), '_not mapped_')
-              print(f'| \`{r[\"name\"]}\` | {r[\"type\"]} | {r[\"location\"]} | \`{mod}\` |')
+          echo "$RESOURCES" | python3 deployment/orchestrator/cli/resource_mapper.py
           " >> "$GITHUB_STEP_SUMMARY"
 
       - name: Code repository deployment guide
