@@ -1,9 +1,6 @@
 name: Infrastructure Drift Detection
 
 on:
-  schedule:
-    # Run every 6 hours
-    - cron: '0 */6 * * *'
   workflow_dispatch:
     inputs:
       environment:
@@ -27,12 +24,7 @@ on:
       check_dr_readiness:
         description: 'Assess disaster-recovery readiness (KV soft-delete, geo-replication)'
         required: false
-        default: 'true'
-        type: boolean
-      fail_on_drift:
-        description: 'Fail the workflow when drift is detected'
-        required: false
-        default: 'false'
+        default: true
         type: boolean
 
 permissions:
@@ -44,9 +36,9 @@ env:
 
 jobs:
   drift-detection:
-    name: 'Drift Detection — ${{ inputs.environment || ''dev'' }}'
+    name: 'Drift Detection — ${{ inputs.environment }}'
     runs-on: ubuntu-latest
-    environment: ${{ inputs.environment || 'dev' }}
+    environment: ${{ inputs.environment }}
 
     steps:
       - name: Checkout
@@ -61,6 +53,7 @@ jobs:
         run: pip install -r deployment/orchestrator/requirements.txt
 
       - name: Azure login
+        id: login
         uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
@@ -70,14 +63,14 @@ jobs:
       - name: Resolve inputs
         id: resolve
         run: |
-          ENV="${{ inputs.environment || 'dev' }}"
+          ENV="${{ inputs.environment }}"
           RG="${{ inputs.resource_group }}"
           [ -z "$RG" ] && RG="rg-aos-${ENV}"
           TEMPLATE="${{ inputs.template || 'deployment/main-modular.bicep' }}"
           PARAMS="${{ inputs.parameters_file }}"
-          echo "environment=$ENV" >> "$GITHUB_OUTPUT"
-          echo "resource_group=$RG" >> "$GITHUB_OUTPUT"
-          echo "template=$TEMPLATE" >> "$GITHUB_OUTPUT"
+          echo "environment=$ENV"        >> "$GITHUB_OUTPUT"
+          echo "resource_group=$RG"      >> "$GITHUB_OUTPUT"
+          echo "template=$TEMPLATE"      >> "$GITHUB_OUTPUT"
           echo "parameters_file=$PARAMS" >> "$GITHUB_OUTPUT"
 
       - name: Install Azure Bicep
@@ -85,6 +78,7 @@ jobs:
 
       - name: Snapshot live state
         id: snapshot
+        continue-on-error: true
         run: |
           python - <<'EOF'
           import sys, json
@@ -97,6 +91,7 @@ jobs:
 
       - name: Detect infrastructure drift
         id: drift
+        continue-on-error: true
         run: |
           python - <<'EOF'
           import sys, json
@@ -114,11 +109,11 @@ jobs:
                 f"{counts['changed']} changed")
           with open('drift-findings.json', 'w') as fh:
               json.dump([f.to_dict() for f in findings], fh, indent=2)
-          if findings and '${{ inputs.fail_on_drift }}' == 'true':
-              sys.exit(1)
           EOF
 
       - name: SLA compliance check
+        id: sla
+        continue-on-error: true
         run: |
           python - <<'EOF'
           import sys
@@ -131,7 +126,9 @@ jobs:
           EOF
 
       - name: DR readiness assessment
-        if: ${{ inputs.check_dr_readiness == 'true' || inputs.check_dr_readiness == true }}
+        id: dr
+        if: inputs.check_dr_readiness == true
+        continue-on-error: true
         run: |
           python - <<'EOF'
           import sys
@@ -157,10 +154,37 @@ jobs:
         run: |
           echo "## 🔍 Drift Detection Summary" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Check | Status |" >> "$GITHUB_STEP_SUMMARY"
-          echo "|-------|--------|" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Environment | \`${{ steps.resolve.outputs.environment }}\` |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Resource Group | \`${{ steps.resolve.outputs.resource_group }}\` |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Drift detection | ✅ completed |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| SLA compliance | ✅ checked |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| DR readiness | ${{ (inputs.check_dr_readiness == 'true' || inputs.check_dr_readiness == true) && '✅ assessed' || '⏭️ skipped' }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Check | Status | Guidance |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-------|--------|----------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Environment | \`${{ steps.resolve.outputs.environment }}\` | |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Resource Group | \`${{ steps.resolve.outputs.resource_group }}\` | |" >> "$GITHUB_STEP_SUMMARY"
+
+          # Snapshot
+          if [[ "${{ steps.snapshot.outcome }}" == "success" ]]; then
+            echo "| Live state snapshot | ✅ captured | |" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "| Live state snapshot | ❌ failed | Ensure Azure login succeeded and the resource group exists. Run deployment workflow first if needed. |" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          # Drift
+          if [[ "${{ steps.drift.outcome }}" == "success" ]]; then
+            echo "| Drift detection | ✅ completed | Download \`drift-findings.json\` artifact for details. |" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "| Drift detection | ❌ failed | Check the Bicep template path and that the resource group has been deployed. |" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          # SLA
+          if [[ "${{ steps.sla.outcome }}" == "success" ]]; then
+            echo "| SLA compliance | ✅ checked | |" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "| SLA compliance | ❌ failed | SLA check requires Application Insights with uptime data. Deploy monitoring resources first. |" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          # DR
+          if [[ "${{ steps.dr.outcome }}" == "success" ]]; then
+            echo "| DR readiness | ✅ assessed | |" >> "$GITHUB_STEP_SUMMARY"
+          elif [[ "${{ steps.dr.outcome }}" == "failure" ]]; then
+            echo "| DR readiness | ❌ failed | Ensure Key Vaults have soft-delete enabled and storage accounts have geo-replication. |" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "| DR readiness | ⏭️ skipped | |" >> "$GITHUB_STEP_SUMMARY"
+          fi

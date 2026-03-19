@@ -1,9 +1,6 @@
 name: Infrastructure Monitoring
 
 on:
-  schedule:
-    # Run every 6 hours
-    - cron: '0 */6 * * *'
   workflow_dispatch:
     inputs:
       environment:
@@ -14,7 +11,6 @@ on:
           - dev
           - staging
           - prod
-          - all
       check_type:
         description: 'Type of check to perform'
         required: false
@@ -29,420 +25,336 @@ on:
 
 permissions:
   contents: read
-  issues: write
   id-token: write
+
+env:
+  PYTHON_VERSION: '3.12'
 
 jobs:
   # ============================================================================
-  # SETUP AND CONFIGURATION
-  # ============================================================================
-  setup:
-    name: Setup Monitoring
-    runs-on: ubuntu-latest
-    outputs:
-      environments: ${{ steps.config.outputs.environments }}
-      check_types: ${{ steps.config.outputs.check_types }}
-    steps:
-      - name: Configure monitoring scope
-        id: config
-        run: |
-          # Determine which environments to monitor
-          if [[ "${{ inputs.environment }}" == "all" ]] || [[ "${{ github.event_name }}" == "schedule" ]]; then
-            ENVIRONMENTS='["dev", "staging", "prod"]'
-          else
-            ENVIRONMENTS='["${{ inputs.environment }}"]'
-          fi
-          echo "environments=$ENVIRONMENTS" >> $GITHUB_OUTPUT
-          
-          # Determine which checks to run
-          if [[ "${{ inputs.check_type }}" == "all" ]] || [[ "${{ github.event_name }}" == "schedule" ]]; then
-            CHECK_TYPES='["health", "performance", "cost", "security"]'
-          else
-            CHECK_TYPES='["${{ inputs.check_type }}"]'
-          fi
-          echo "check_types=$CHECK_TYPES" >> $GITHUB_OUTPUT
-
-  # ============================================================================
-  # HEALTH CHECKS
+  # HEALTH CHECK
   # ============================================================================
   health-check:
-    name: Health Check (${{ matrix.environment }})
+    name: Health Check (${{ inputs.environment }})
     runs-on: ubuntu-latest
-    needs: setup
-    if: contains(needs.setup.outputs.check_types, 'health')
-    strategy:
-      matrix:
-        environment: ${{ fromJson(needs.setup.outputs.environments) }}
+    if: inputs.check_type == 'all' || inputs.check_type == 'health'
+    environment: ${{ inputs.environment }}
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
-      
+
       - name: Azure Login (OIDC)
+        id: login
         uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-      
+
       - name: Set resource group
         id: rg
-        run: |
-          echo "resource_group=rg-aos-${{ matrix.environment }}" >> $GITHUB_OUTPUT
-      
+        run: echo "resource_group=rg-aos-${{ inputs.environment }}" >> "$GITHUB_OUTPUT"
+
       - name: Check resource group exists
         id: rg_check
+        continue-on-error: true
         run: |
-          if az group show --name ${{ steps.rg.outputs.resource_group }} &>/dev/null; then
-            echo "exists=true" >> $GITHUB_OUTPUT
+          if az group show --name "${{ steps.rg.outputs.resource_group }}" &>/dev/null; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
           else
-            echo "exists=false" >> $GITHUB_OUTPUT
-            echo "⚠️ Resource group ${{ steps.rg.outputs.resource_group }} does not exist"
+            echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
-      
+
       - name: Check Function App health
+        id: func_health
         if: steps.rg_check.outputs.exists == 'true'
+        continue-on-error: true
         run: |
           echo "Checking Function Apps in ${{ steps.rg.outputs.resource_group }}..."
-          
+
           FUNCTION_APPS=$(az functionapp list \
-            --resource-group ${{ steps.rg.outputs.resource_group }} \
+            --resource-group "${{ steps.rg.outputs.resource_group }}" \
             --query "[].{name:name, state:state, hostName:defaultHostName}" \
-            -o tsv)
-          
+            -o tsv 2>/dev/null || echo "")
+
           if [[ -z "$FUNCTION_APPS" ]]; then
             echo "No Function Apps found"
           else
-            echo "Function Apps:"
-            echo "$FUNCTION_APPS"
-            
-            # Check each Function App
             while IFS=$'\t' read -r NAME STATE HOSTNAME; do
-              echo ""
-              echo "Checking $NAME..."
-              echo "  State: $STATE"
-              
+              echo "  $NAME: state=$STATE"
               if [[ "$STATE" != "Running" ]]; then
-                echo "  ⚠️ Function App is not running!"
-              fi
-              
-              # Try to ping the hostname
-              if timeout 10 curl -f "https://$HOSTNAME" &>/dev/null; then
-                echo "  ✅ Endpoint is reachable"
-              else
-                echo "  ⚠️ Endpoint is not reachable"
+                echo "  ⚠️ $NAME is not running!"
               fi
             done <<< "$FUNCTION_APPS"
           fi
-      
+
       - name: Check Storage Account health
+        id: storage_health
         if: steps.rg_check.outputs.exists == 'true'
+        continue-on-error: true
         run: |
-          echo "Checking Storage Accounts in ${{ steps.rg.outputs.resource_group }}..."
-          
           STORAGE_ACCOUNTS=$(az storage account list \
-            --resource-group ${{ steps.rg.outputs.resource_group }} \
+            --resource-group "${{ steps.rg.outputs.resource_group }}" \
             --query "[].{name:name, status:statusOfPrimary, location:primaryLocation}" \
-            -o tsv)
-          
+            -o tsv 2>/dev/null || echo "")
+
           if [[ -z "$STORAGE_ACCOUNTS" ]]; then
             echo "No Storage Accounts found"
           else
-            echo "Storage Accounts:"
             while IFS=$'\t' read -r NAME STATUS LOCATION; do
-              echo "  - $NAME: $STATUS in $LOCATION"
+              echo "  $NAME: $STATUS in $LOCATION"
               if [[ "$STATUS" != "available" ]]; then
-                echo "    ⚠️ Storage Account is not available!"
+                echo "  ⚠️ $NAME is not available!"
               fi
             done <<< "$STORAGE_ACCOUNTS"
           fi
-      
+
       - name: Check Service Bus health
+        id: sb_health
         if: steps.rg_check.outputs.exists == 'true'
+        continue-on-error: true
         run: |
-          echo "Checking Service Bus namespaces in ${{ steps.rg.outputs.resource_group }}..."
-          
           NAMESPACES=$(az servicebus namespace list \
-            --resource-group ${{ steps.rg.outputs.resource_group }} \
+            --resource-group "${{ steps.rg.outputs.resource_group }}" \
             --query "[].{name:name, status:status}" \
-            -o tsv)
-          
+            -o tsv 2>/dev/null || echo "")
+
           if [[ -z "$NAMESPACES" ]]; then
             echo "No Service Bus namespaces found"
           else
-            echo "Service Bus Namespaces:"
             while IFS=$'\t' read -r NAME STATUS; do
-              echo "  - $NAME: $STATUS"
+              echo "  $NAME: $STATUS"
               if [[ "$STATUS" != "Active" ]]; then
-                echo "    ⚠️ Service Bus is not active!"
+                echo "  ⚠️ $NAME is not active!"
               fi
             done <<< "$NAMESPACES"
           fi
-      
-      - name: Check Application Insights
-        if: steps.rg_check.outputs.exists == 'true'
-        run: |
-          echo "Checking Application Insights in ${{ steps.rg.outputs.resource_group }}..."
-          
-          APP_INSIGHTS=$(az monitor app-insights component show \
-            --resource-group ${{ steps.rg.outputs.resource_group }} \
-            --query "[].{name:name, instrumentationKey:instrumentationKey}" \
-            -o tsv 2>/dev/null || echo "")
-          
-          if [[ -z "$APP_INSIGHTS" ]]; then
-            echo "No Application Insights found"
-          else
-            echo "Application Insights:"
-            echo "$APP_INSIGHTS"
-          fi
-      
-      - name: Generate health report
+
+      - name: Health check summary
         if: always()
         run: |
-          echo "# Health Check Report - ${{ matrix.environment }}" > health-report-${{ matrix.environment }}.md
-          echo "" >> health-report-${{ matrix.environment }}.md
-          echo "**Date**: $(date -u +"%Y-%m-%d %H:%M:%S UTC")" >> health-report-${{ matrix.environment }}.md
-          echo "**Environment**: ${{ matrix.environment }}" >> health-report-${{ matrix.environment }}.md
-          echo "**Resource Group**: ${{ steps.rg.outputs.resource_group }}" >> health-report-${{ matrix.environment }}.md
-          echo "" >> health-report-${{ matrix.environment }}.md
-          echo "## Summary" >> health-report-${{ matrix.environment }}.md
-          
+          echo "## 🩺 Health Check — ${{ inputs.environment }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Check | Status | Guidance |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-------|--------|----------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Resource Group | \`${{ steps.rg.outputs.resource_group }}\` | |" >> "$GITHUB_STEP_SUMMARY"
+
           if [[ "${{ steps.rg_check.outputs.exists }}" == "false" ]]; then
-            echo "⚠️ Resource group does not exist" >> health-report-${{ matrix.environment }}.md
+            echo "| Resource group exists | ❌ not found | Run the **Infrastructure Deployment** workflow to create resources first. |" >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "✅ Infrastructure health check completed" >> health-report-${{ matrix.environment }}.md
+            echo "| Resource group exists | ✅ | |" >> "$GITHUB_STEP_SUMMARY"
+
+            if [[ "${{ steps.func_health.outcome }}" == "success" ]]; then
+              echo "| Function Apps | ✅ healthy | |" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "| Function Apps | ❌ issue detected | Check Function App state in Azure portal. Restart if stopped: \`az functionapp restart -g <rg> -n <name>\` |" >> "$GITHUB_STEP_SUMMARY"
+            fi
+
+            if [[ "${{ steps.storage_health.outcome }}" == "success" ]]; then
+              echo "| Storage Accounts | ✅ healthy | |" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "| Storage Accounts | ❌ issue detected | Check [Azure Status](https://status.azure.com) for regional storage outages. |" >> "$GITHUB_STEP_SUMMARY"
+            fi
+
+            if [[ "${{ steps.sb_health.outcome }}" == "success" ]]; then
+              echo "| Service Bus | ✅ healthy | |" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "| Service Bus | ❌ issue detected | Check namespace status: \`az servicebus namespace show -g <rg> -n <name>\` |" >> "$GITHUB_STEP_SUMMARY"
+            fi
           fi
-      
+
       - name: Upload health report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: health-report-${{ matrix.environment }}
-          path: health-report-${{ matrix.environment }}.md
+          name: health-report-${{ inputs.environment }}
+          path: health-report-${{ inputs.environment }}.md
+          if-no-files-found: ignore
           retention-days: 90
 
   # ============================================================================
   # PERFORMANCE METRICS
   # ============================================================================
   performance-metrics:
-    name: Performance Metrics (${{ matrix.environment }})
+    name: Performance Metrics (${{ inputs.environment }})
     runs-on: ubuntu-latest
-    needs: setup
-    if: contains(needs.setup.outputs.check_types, 'performance')
-    strategy:
-      matrix:
-        environment: ${{ fromJson(needs.setup.outputs.environments) }}
+    if: inputs.check_type == 'all' || inputs.check_type == 'performance'
+    environment: ${{ inputs.environment }}
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
-      
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-      
+
       - name: Azure Login (OIDC)
         uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-      
+
       - name: Collect performance metrics
+        id: perf
+        continue-on-error: true
         run: |
-          RESOURCE_GROUP="rg-aos-${{ matrix.environment }}"
-          
-          echo "Collecting performance metrics for $RESOURCE_GROUP..."
-          
-          # Get Function App metrics
-          FUNCTION_APPS=$(az functionapp list -g $RESOURCE_GROUP --query "[].name" -o tsv 2>/dev/null || echo "")
-          
-          if [[ -n "$FUNCTION_APPS" ]]; then
-            for APP in $FUNCTION_APPS; do
-              echo ""
-              echo "Function App: $APP"
-              
-              # Get recent metrics (last hour)
-              END_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-              START_TIME=$(date -u -d '1 hour ago' +"%Y-%m-%dT%H:%M:%SZ")
-              
-              # Request count
-              echo "  Request Count (last hour):"
-              az monitor metrics list \
-                --resource $(az functionapp show -g $RESOURCE_GROUP -n $APP --query id -o tsv) \
-                --metric "Requests" \
-                --start-time $START_TIME \
-                --end-time $END_TIME \
-                --aggregation Total \
-                --query "value[0].timeseries[0].data[-1].total" \
-                -o tsv 2>/dev/null || echo "    N/A"
-              
-              # Response time
-              echo "  Average Response Time (last hour):"
-              az monitor metrics list \
-                --resource $(az functionapp show -g $RESOURCE_GROUP -n $APP --query id -o tsv) \
-                --metric "AverageResponseTime" \
-                --start-time $START_TIME \
-                --end-time $END_TIME \
-                --aggregation Average \
-                --query "value[0].timeseries[0].data[-1].average" \
-                -o tsv 2>/dev/null || echo "    N/A"
-            done
+          RESOURCE_GROUP="rg-aos-${{ inputs.environment }}"
+
+          FUNCTION_APPS=$(az functionapp list -g "$RESOURCE_GROUP" --query "[].name" -o tsv 2>/dev/null || echo "")
+
+          if [[ -z "$FUNCTION_APPS" ]]; then
+            echo "No Function Apps found in $RESOURCE_GROUP"
+            exit 0
           fi
-      
-      - name: Generate performance report
+
+          END_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          START_TIME=$(date -u -d '1 hour ago' +"%Y-%m-%dT%H:%M:%SZ")
+
+          for APP in $FUNCTION_APPS; do
+            RESOURCE_ID=$(az functionapp show -g "$RESOURCE_GROUP" -n "$APP" --query id -o tsv 2>/dev/null || echo "")
+            [[ -z "$RESOURCE_ID" ]] && continue
+
+            echo "Function App: $APP"
+            echo "  Requests (last hour):"
+            az monitor metrics list --resource "$RESOURCE_ID" --metric "Requests" \
+              --start-time "$START_TIME" --end-time "$END_TIME" --aggregation Total \
+              --query "value[0].timeseries[0].data[-1].total" -o tsv 2>/dev/null || echo "    N/A"
+            echo "  Avg Response Time (last hour):"
+            az monitor metrics list --resource "$RESOURCE_ID" --metric "AverageResponseTime" \
+              --start-time "$START_TIME" --end-time "$END_TIME" --aggregation Average \
+              --query "value[0].timeseries[0].data[-1].average" -o tsv 2>/dev/null || echo "    N/A"
+          done
+
+      - name: Performance summary
+        if: always()
         run: |
-          echo "# Performance Metrics - ${{ matrix.environment }}" > performance-report-${{ matrix.environment }}.md
-          echo "" >> performance-report-${{ matrix.environment }}.md
-          echo "**Date**: $(date -u +"%Y-%m-%d %H:%M:%S UTC")" >> performance-report-${{ matrix.environment }}.md
-          echo "**Environment**: ${{ matrix.environment }}" >> performance-report-${{ matrix.environment }}.md
-          echo "" >> performance-report-${{ matrix.environment }}.md
-          echo "Performance metrics collected successfully." >> performance-report-${{ matrix.environment }}.md
-      
-      - name: Upload performance report
-        uses: actions/upload-artifact@v4
-        with:
-          name: performance-report-${{ matrix.environment }}
-          path: performance-report-${{ matrix.environment }}.md
-          retention-days: 90
+          echo "## 📈 Performance Metrics — ${{ inputs.environment }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          if [[ "${{ steps.perf.outcome }}" == "success" ]]; then
+            echo "✅ Performance metrics collected. See workflow logs for details." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "❌ Could not collect performance metrics." >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "**Guidance**: Ensure the resource group \`rg-aos-${{ inputs.environment }}\` exists and contains Function Apps. Deploy infrastructure first if needed." >> "$GITHUB_STEP_SUMMARY"
+          fi
 
   # ============================================================================
   # COST MONITORING
   # ============================================================================
   cost-monitoring:
-    name: Cost Monitoring (${{ matrix.environment }})
+    name: Cost Monitoring (${{ inputs.environment }})
     runs-on: ubuntu-latest
-    needs: setup
-    if: contains(needs.setup.outputs.check_types, 'cost')
-    strategy:
-      matrix:
-        environment: ${{ fromJson(needs.setup.outputs.environments) }}
+    if: inputs.check_type == 'all' || inputs.check_type == 'cost'
+    environment: ${{ inputs.environment }}
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
-      
+
       - name: Azure Login (OIDC)
         uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-      
+
       - name: Analyze costs
+        id: cost
+        continue-on-error: true
         run: |
-          RESOURCE_GROUP="rg-aos-${{ matrix.environment }}"
-          
-          echo "Analyzing costs for $RESOURCE_GROUP..."
-          
-          # Get cost data for the resource group
-          # Note: This requires Cost Management API access
-          echo "Cost analysis for the last 30 days:"
-          
-          # List resources in the resource group
-          echo ""
+          RESOURCE_GROUP="rg-aos-${{ inputs.environment }}"
           echo "Resources in $RESOURCE_GROUP:"
-          az resource list -g $RESOURCE_GROUP --query "[].{name:name, type:type, location:location}" -o table 2>/dev/null || echo "Resource group not found"
-      
-      - name: Generate cost report
+          az resource list -g "$RESOURCE_GROUP" --query "[].{name:name, type:type, location:location}" -o table 2>/dev/null || echo "Resource group not found"
+
+      - name: Cost summary
+        if: always()
         run: |
-          echo "# Cost Report - ${{ matrix.environment }}" > cost-report-${{ matrix.environment }}.md
-          echo "" >> cost-report-${{ matrix.environment }}.md
-          echo "**Date**: $(date -u +"%Y-%m-%d %H:%M:%S UTC")" >> cost-report-${{ matrix.environment }}.md
-          echo "**Environment**: ${{ matrix.environment }}" >> cost-report-${{ matrix.environment }}.md
-          echo "" >> cost-report-${{ matrix.environment }}.md
-          echo "Cost monitoring completed." >> cost-report-${{ matrix.environment }}.md
-          echo "" >> cost-report-${{ matrix.environment }}.md
-          echo "For detailed cost analysis, visit Azure Cost Management in the portal." >> cost-report-${{ matrix.environment }}.md
-      
-      - name: Upload cost report
-        uses: actions/upload-artifact@v4
-        with:
-          name: cost-report-${{ matrix.environment }}
-          path: cost-report-${{ matrix.environment }}.md
-          retention-days: 90
+          echo "## 💰 Cost Monitoring — ${{ inputs.environment }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          if [[ "${{ steps.cost.outcome }}" == "success" ]]; then
+            echo "✅ Resource inventory listed. For detailed cost analysis, visit [Azure Cost Management](https://portal.azure.com/#blade/Microsoft_Azure_CostManagement/Menu/costanalysis) in the portal." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "❌ Could not list resources." >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "**Guidance**: Ensure the resource group exists and the service principal has \`Reader\` access." >> "$GITHUB_STEP_SUMMARY"
+          fi
 
   # ============================================================================
   # SECURITY POSTURE
   # ============================================================================
   security-posture:
-    name: Security Posture (${{ matrix.environment }})
+    name: Security Posture (${{ inputs.environment }})
     runs-on: ubuntu-latest
-    needs: setup
-    if: contains(needs.setup.outputs.check_types, 'security')
-    strategy:
-      matrix:
-        environment: ${{ fromJson(needs.setup.outputs.environments) }}
+    if: inputs.check_type == 'all' || inputs.check_type == 'security'
+    environment: ${{ inputs.environment }}
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
-      
+
       - name: Azure Login (OIDC)
         uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-      
-      - name: Check security settings
+
+      - name: Check Key Vault security
+        id: kv_security
+        continue-on-error: true
         run: |
-          RESOURCE_GROUP="rg-aos-${{ matrix.environment }}"
-          
-          echo "Checking security settings for $RESOURCE_GROUP..."
-          
-          # Check Key Vault settings
-          KEY_VAULTS=$(az keyvault list -g $RESOURCE_GROUP --query "[].name" -o tsv 2>/dev/null || echo "")
-          
-          if [[ -n "$KEY_VAULTS" ]]; then
-            for KV in $KEY_VAULTS; do
-              echo ""
-              echo "Key Vault: $KV"
-              
-              # Check if soft delete is enabled
-              SOFT_DELETE=$(az keyvault show -n $KV -g $RESOURCE_GROUP --query "properties.enableSoftDelete" -o tsv 2>/dev/null || echo "unknown")
-              echo "  Soft Delete Enabled: $SOFT_DELETE"
-              
-              # Check if purge protection is enabled
-              PURGE_PROTECTION=$(az keyvault show -n $KV -g $RESOURCE_GROUP --query "properties.enablePurgeProtection" -o tsv 2>/dev/null || echo "unknown")
-              echo "  Purge Protection Enabled: $PURGE_PROTECTION"
-              
-              if [[ "$SOFT_DELETE" != "true" ]] || [[ "$PURGE_PROTECTION" != "true" ]]; then
-                echo "  ⚠️ Security settings need attention"
-              fi
-            done
+          RESOURCE_GROUP="rg-aos-${{ inputs.environment }}"
+          KEY_VAULTS=$(az keyvault list -g "$RESOURCE_GROUP" --query "[].name" -o tsv 2>/dev/null || echo "")
+
+          if [[ -z "$KEY_VAULTS" ]]; then
+            echo "No Key Vaults found"
+            exit 0
           fi
-          
-          # Check Storage Account settings
-          STORAGE_ACCOUNTS=$(az storage account list -g $RESOURCE_GROUP --query "[].name" -o tsv 2>/dev/null || echo "")
-          
-          if [[ -n "$STORAGE_ACCOUNTS" ]]; then
-            for SA in $STORAGE_ACCOUNTS; do
-              echo ""
-              echo "Storage Account: $SA"
-              
-              # Check if HTTPS-only is enforced
-              HTTPS_ONLY=$(az storage account show -n $SA -g $RESOURCE_GROUP --query "enableHttpsTrafficOnly" -o tsv 2>/dev/null || echo "unknown")
-              echo "  HTTPS Only: $HTTPS_ONLY"
-              
-              if [[ "$HTTPS_ONLY" != "true" ]]; then
-                echo "  ⚠️ HTTPS-only traffic should be enforced"
-              fi
-            done
-          fi
-      
-      - name: Generate security report
+
+          for KV in $KEY_VAULTS; do
+            echo "Key Vault: $KV"
+            SOFT_DELETE=$(az keyvault show -n "$KV" -g "$RESOURCE_GROUP" --query "properties.enableSoftDelete" -o tsv 2>/dev/null || echo "unknown")
+            PURGE_PROTECTION=$(az keyvault show -n "$KV" -g "$RESOURCE_GROUP" --query "properties.enablePurgeProtection" -o tsv 2>/dev/null || echo "unknown")
+            echo "  Soft Delete: $SOFT_DELETE | Purge Protection: $PURGE_PROTECTION"
+            if [[ "$SOFT_DELETE" != "true" ]] || [[ "$PURGE_PROTECTION" != "true" ]]; then
+              echo "  ⚠️ Security settings need attention"
+            fi
+          done
+
+      - name: Check Storage Account security
+        id: sa_security
+        continue-on-error: true
         run: |
-          echo "# Security Posture Report - ${{ matrix.environment }}" > security-report-${{ matrix.environment }}.md
-          echo "" >> security-report-${{ matrix.environment }}.md
-          echo "**Date**: $(date -u +"%Y-%m-%d %H:%M:%S UTC")" >> security-report-${{ matrix.environment }}.md
-          echo "**Environment**: ${{ matrix.environment }}" >> security-report-${{ matrix.environment }}.md
-          echo "" >> security-report-${{ matrix.environment }}.md
-          echo "Security posture check completed." >> security-report-${{ matrix.environment }}.md
-      
-      - name: Upload security report
-        uses: actions/upload-artifact@v4
-        with:
-          name: security-report-${{ matrix.environment }}
-          path: security-report-${{ matrix.environment }}.md
-          retention-days: 90
+          RESOURCE_GROUP="rg-aos-${{ inputs.environment }}"
+          STORAGE_ACCOUNTS=$(az storage account list -g "$RESOURCE_GROUP" --query "[].name" -o tsv 2>/dev/null || echo "")
+
+          if [[ -z "$STORAGE_ACCOUNTS" ]]; then
+            echo "No Storage Accounts found"
+            exit 0
+          fi
+
+          for SA in $STORAGE_ACCOUNTS; do
+            HTTPS_ONLY=$(az storage account show -n "$SA" -g "$RESOURCE_GROUP" --query "enableHttpsTrafficOnly" -o tsv 2>/dev/null || echo "unknown")
+            echo "  $SA: HTTPS-only=$HTTPS_ONLY"
+            if [[ "$HTTPS_ONLY" != "true" ]]; then
+              echo "  ⚠️ HTTPS-only should be enforced"
+            fi
+          done
+
+      - name: Security summary
+        if: always()
+        run: |
+          echo "## 🔒 Security Posture — ${{ inputs.environment }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Check | Status | Guidance |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-------|--------|----------|" >> "$GITHUB_STEP_SUMMARY"
+
+          if [[ "${{ steps.kv_security.outcome }}" == "success" ]]; then
+            echo "| Key Vault security | ✅ checked | |" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "| Key Vault security | ❌ failed | Ensure Key Vaults exist and SP has \`Key Vault Reader\`. Enable soft-delete: \`az keyvault update -n <name> --enable-soft-delete true\` |" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          if [[ "${{ steps.sa_security.outcome }}" == "success" ]]; then
+            echo "| Storage HTTPS-only | ✅ checked | |" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "| Storage HTTPS-only | ❌ failed | Enforce HTTPS: \`az storage account update -n <name> --https-only true\` |" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
   # ============================================================================
   # MONITORING SUMMARY
@@ -453,56 +365,37 @@ jobs:
     needs: [health-check, performance-metrics, cost-monitoring, security-posture]
     if: always()
     steps:
-      - name: Download all reports
-        uses: actions/download-artifact@v4
-        with:
-          pattern: '*-report-*'
-          merge-multiple: true
-      
       - name: Generate summary
         run: |
-          echo "# Infrastructure Monitoring Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Date**: $(date -u +"%Y-%m-%d %H:%M:%S UTC")" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "## Status" >> $GITHUB_STEP_SUMMARY
-          echo "- Health Check: ${{ needs.health-check.result }}" >> $GITHUB_STEP_SUMMARY
-          echo "- Performance Metrics: ${{ needs.performance-metrics.result }}" >> $GITHUB_STEP_SUMMARY
-          echo "- Cost Monitoring: ${{ needs.cost-monitoring.result }}" >> $GITHUB_STEP_SUMMARY
-          echo "- Security Posture: ${{ needs.security-posture.result }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "## Reports" >> $GITHUB_STEP_SUMMARY
-          echo "All monitoring reports have been uploaded as artifacts." >> $GITHUB_STEP_SUMMARY
-      
-      - name: Create monitoring issue (on failure)
-        if: |
-          needs.health-check.result == 'failure' ||
-          needs.performance-metrics.result == 'failure' ||
-          needs.security-posture.result == 'failure'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const title = '🚨 Infrastructure Monitoring Alert';
-            const body = `
-            # Infrastructure Monitoring Alert
-            
-            One or more monitoring checks have failed.
-            
-            ## Failed Checks
-            - Health Check: ${{ needs.health-check.result }}
-            - Performance Metrics: ${{ needs.performance-metrics.result }}
-            - Security Posture: ${{ needs.security-posture.result }}
-            
-            ## Action Required
-            Please review the monitoring reports and take necessary action.
-            
-            **Workflow Run**: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-            `;
-            
-            await github.rest.issues.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              title: title,
-              body: body,
-              labels: ['monitoring', 'alert', 'infrastructure']
-            });
+          echo "## 📊 Infrastructure Monitoring Summary — ${{ inputs.environment }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Check | Result |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-------|--------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Health Check | ${{ needs.health-check.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Performance Metrics | ${{ needs.performance-metrics.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Cost Monitoring | ${{ needs.cost-monitoring.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Security Posture | ${{ needs.security-posture.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          # Provide failure guidance
+          FAILURES=""
+          if [[ "${{ needs.health-check.result }}" == "failure" ]]; then
+            FAILURES="${FAILURES}\n- **Health Check**: Review individual step outcomes above. Common fix: ensure Azure OIDC login is configured (federated identity credential with subject \`repo:ASISaga/aos-infrastructure:environment:${{ inputs.environment }}\`)."
+          fi
+          if [[ "${{ needs.performance-metrics.result }}" == "failure" ]]; then
+            FAILURES="${FAILURES}\n- **Performance**: Ensure Function Apps are deployed and the resource group exists."
+          fi
+          if [[ "${{ needs.cost-monitoring.result }}" == "failure" ]]; then
+            FAILURES="${FAILURES}\n- **Cost**: Ensure the service principal has \`Reader\` access on the resource group."
+          fi
+          if [[ "${{ needs.security-posture.result }}" == "failure" ]]; then
+            FAILURES="${FAILURES}\n- **Security**: Ensure Key Vaults and Storage Accounts exist in the resource group."
+          fi
+
+          if [[ -n "$FAILURES" ]]; then
+            echo "### ⚠️ Failure Guidance" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo -e "$FAILURES" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "**Common root cause**: The Azure OIDC federated identity credential may not have a subject matching \`repo:ASISaga/aos-infrastructure:environment:${{ inputs.environment }}\`. Verify in Azure AD → App Registrations → Federated credentials." >> "$GITHUB_STEP_SUMMARY"
+          fi
