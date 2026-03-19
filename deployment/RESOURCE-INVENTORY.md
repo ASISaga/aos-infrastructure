@@ -37,17 +37,26 @@ These resources have no separate code repository — they are created once per e
 
 ## Platform Service Function Apps
 
-Each AOS platform repository deploys to a dedicated Function App created by `modules/functionapp.bicep`. Each Function App gets its own Flex Consumption (FC1) plan and user-assigned managed identity for OIDC-based deployment.
+Each AOS platform repository that is an Azure Function App gets a dedicated Flex Consumption (FC1) plan, Function App, and user-assigned managed identity for OIDC-based deployment.
+
+> **Note on code-only repositories**: `aos-kernel`, `aos-intelligence`, `aos-client-sdk`, and `aos-dispatcher` are Python library packages — they are **not** Azure Function Apps. They are imported at runtime by `agent-operating-system`, which is the single deployable Function App. Similarly, `purpose-driven-agent` and `leadership-agent` are base-class packages with no Azure infrastructure.
 
 | Code Repository | Azure Function App | Custom Domain | Deploy From |
 |----------------|-------------------|---------------|-------------|
-| [aos-kernel](https://github.com/ASISaga/aos-kernel) | `func-aos-kernel-{env}-{suffix}` | `aos-kernel.asisaga.com` | `aos-kernel` repo → `az functionapp deploy` |
-| [aos-intelligence](https://github.com/ASISaga/aos-intelligence) | `func-aos-intelligence-{env}-{suffix}` | `aos-intelligence.asisaga.com` | `aos-intelligence` repo |
+| [agent-operating-system](https://github.com/ASISaga/agent-operating-system) | `func-agent-operating-system-{env}-{suffix}` | `agent-operating-system.asisaga.com` | `agent-operating-system` repo → `az functionapp deploy` |
 | [aos-realm-of-agents](https://github.com/ASISaga/aos-realm-of-agents) | `func-aos-realm-of-agents-{env}-{suffix}` | `aos-realm-of-agents.asisaga.com` | `aos-realm-of-agents` repo |
-| [aos-mcp-servers](https://github.com/ASISaga/aos-mcp-servers) | `func-aos-mcp-servers-{env}-{suffix}` | `aos-mcp-servers.asisaga.com` | `aos-mcp-servers` repo |
-| [aos-client-sdk](https://github.com/ASISaga/aos-client-sdk) | `func-aos-client-sdk-{env}-{suffix}` | `aos-client-sdk.asisaga.com` | `aos-client-sdk` repo |
 | [business-infinity](https://github.com/ASISaga/business-infinity) | `func-business-infinity-{env}-{suffix}` | `business-infinity.asisaga.com` | `business-infinity` repo |
-| [aos-dispatcher](https://github.com/ASISaga/aos-dispatcher) | `func-aos-dispatcher-{env}-{suffix}` | `aos-dispatcher.asisaga.com` | `aos-dispatcher` repo |
+
+### Code-Only Library Repositories (no Azure infrastructure)
+
+These repositories are Python packages consumed by `agent-operating-system` at runtime. They have no dedicated Function Apps or Azure resources:
+
+| Repository | Purpose |
+|-----------|---------|
+| [aos-kernel](https://github.com/ASISaga/aos-kernel) | Core AOS kernel — agent lifecycle, orchestration runtime |
+| [aos-intelligence](https://github.com/ASISaga/aos-intelligence) | Intelligence layer — LLM integration, reasoning |
+| [aos-client-sdk](https://github.com/ASISaga/aos-client-sdk) | AOS Client SDK — workflow, deployment helpers |
+| [aos-dispatcher](https://github.com/ASISaga/aos-dispatcher) | Dispatcher logic — message routing between agents |
 
 ### How to Deploy Code to a Function App
 
@@ -89,7 +98,7 @@ C-suite agents deploy to Azure AI Foundry (not Function Apps). Each gets a dedic
 | [cso-agent](https://github.com/ASISaga/cso-agent) | `cso-agent` | `foundry-app.bicep` + `lora-inference.bicep` | `cso-agent-lora-adapter` |
 | [cmo-agent](https://github.com/ASISaga/cmo-agent) | `cmo-agent` | `foundry-app.bicep` + `lora-inference.bicep` | `cmo-agent-lora-adapter` |
 
-## Base Agent Classes (Not Deployed)
+## Base Class Repositories (Not Deployed)
 
 These repositories are Python packages, not Azure-deployed services:
 

@@ -5,6 +5,9 @@
 // so that each agent endpoint carries its own LoRA adapter at inference time without
 // reloading base weights from disk between requests (Provisioned Throughput keeps weights
 // resident in VRAM).
+//
+// NOTE: Online endpoints must be created under a Project workspace, not a Hub workspace.
+// Pass aiProject.outputs.projectId as workspaceId from the parent template.
 
 @description('Azure region')
 param location string
@@ -22,8 +25,8 @@ param uniqueSuffix string
 @description('Resource tags')
 param tags object
 
-@description('AI Hub workspace resource ID (parent for the endpoint)')
-param hubId string
+@description('AI Project workspace resource ID (parent for the endpoint). Must be a Project-kind workspace — Hub workspaces do not support online endpoint creation.')
+param workspaceId string
 
 @description('AI Services account resource ID (compute backbone)')
 param aiServicesAccountId string
@@ -44,7 +47,7 @@ var baseModelId = 'azureml://registries/azureml-meta/models/Meta-Llama-3.3-70B-I
 // ====================================================================
 
 resource llamaEndpoint 'Microsoft.MachineLearningServices/workspaces/onlineEndpoints@2024-10-01' = {
-  name: '${split(hubId, '/')[8]}/${endpointName}'
+  name: '${split(workspaceId, '/')[8]}/${endpointName}'
   location: location
   tags: tags
   kind: 'Managed'
