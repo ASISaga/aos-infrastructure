@@ -31,6 +31,7 @@ MODULE_MAP: Dict[str, str] = {
     "microsoft.apimanagement/service": "modules/ai-gateway.bicep",
     "microsoft.web/sites": "modules/functionapp.bicep",
     "microsoft.web/serverfarms": "modules/functionapp.bicep",
+    "microsoft.web/sites/sourcecontrols": "modules/functionapp.bicep",
     "microsoft.managedidentity/userassignedidentities": "modules/functionapp.bicep (identity)",
     "microsoft.authorization/policyassignments": "modules/policy.bicep",
     "microsoft.consumption/budgets": "modules/budget.bicep",

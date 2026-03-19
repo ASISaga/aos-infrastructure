@@ -47,6 +47,9 @@ class TestMapResourceToModule:
     def test_log_analytics(self) -> None:
         assert resource_mapper.map_resource_to_module("microsoft.operationalinsights/workspaces") == "modules/monitoring.bicep"
 
+    def test_source_controls(self) -> None:
+        assert resource_mapper.map_resource_to_module("microsoft.web/sites/sourcecontrols") == "modules/functionapp.bicep"
+
 
 class TestFormatInventoryTable:
     """Unit tests for format_inventory_table."""
@@ -95,6 +98,7 @@ class TestModuleMapCompleteness:
         "microsoft.cognitiveservices/accounts",
         "microsoft.web/sites",
         "microsoft.web/serverfarms",
+        "microsoft.web/sites/sourcecontrols",
         "microsoft.apimanagement/service",
         "microsoft.machinelearningservices/workspaces",
         "microsoft.machinelearningservices/registries",

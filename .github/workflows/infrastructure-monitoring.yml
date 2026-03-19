@@ -41,11 +41,11 @@ jobs:
     environment: ${{ inputs.environment }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Azure Login (OIDC)
         id: login
-        uses: azure/login@v2
+        uses: azure/login@v3
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
@@ -130,6 +130,32 @@ jobs:
             done <<< "$NAMESPACES"
           fi
 
+      - name: Check source control configuration
+        id: sc_health
+        if: steps.rg_check.outputs.exists == 'true'
+        continue-on-error: true
+        run: |
+          FUNCTION_APPS=$(az functionapp list \
+            --resource-group "${{ steps.rg.outputs.resource_group }}" \
+            --query "[].name" \
+            -o tsv 2>/dev/null || echo "")
+
+          if [[ -z "$FUNCTION_APPS" ]]; then
+            echo "No Function Apps found"
+          else
+            while IFS= read -r APP; do
+              SC_URL=$(az webapp deployment source show \
+                --resource-group "${{ steps.rg.outputs.resource_group }}" \
+                --name "$APP" \
+                --query "repoUrl" -o tsv 2>/dev/null || echo "")
+              if [[ -n "$SC_URL" ]]; then
+                echo "  $APP: source control → $SC_URL"
+              else
+                echo "  ⚠️ $APP: no source control (Microsoft.Web/sites/sourcecontrols) configured"
+              fi
+            done <<< "$FUNCTION_APPS"
+          fi
+
       - name: Health check summary
         if: always()
         run: |
@@ -161,11 +187,19 @@ jobs:
             else
               echo "| Service Bus | ❌ issue detected | Check namespace status: \`az servicebus namespace show -g <rg> -n <name>\` |" >> "$GITHUB_STEP_SUMMARY"
             fi
+
+            if [[ "${{ steps.sc_health.outcome }}" == "success" ]]; then
+              echo "| Source control (sites/sourcecontrols) | ✅ checked | |" >> "$GITHUB_STEP_SUMMARY"
+            elif [[ "${{ steps.sc_health.outcome }}" == "failure" ]]; then
+              echo "| Source control (sites/sourcecontrols) | ❌ failed | Ensure \`Microsoft.Web/sites/sourcecontrols\` is provisioned. Re-run the deployment workflow. |" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "| Source control (sites/sourcecontrols) | ⏭️ skipped | |" >> "$GITHUB_STEP_SUMMARY"
+            fi
           fi
 
       - name: Upload health report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: health-report-${{ inputs.environment }}
           path: health-report-${{ inputs.environment }}.md
@@ -182,10 +216,10 @@ jobs:
     environment: ${{ inputs.environment }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Azure Login (OIDC)
-        uses: azure/login@v2
+        uses: azure/login@v3
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
@@ -245,10 +279,10 @@ jobs:
     environment: ${{ inputs.environment }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Azure Login (OIDC)
-        uses: azure/login@v2
+        uses: azure/login@v3
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
@@ -285,10 +319,10 @@ jobs:
     environment: ${{ inputs.environment }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Azure Login (OIDC)
-        uses: azure/login@v2
+        uses: azure/login@v3
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
