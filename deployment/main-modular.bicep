@@ -221,6 +221,7 @@ module modelRegistry 'modules/model-registry.bicep' = {
 // Llama-3.3-70B-Instruct Managed Online Endpoint with Multi-LoRA support — one per C-suite agent
 // Each agent gets its own LoRA-enabled endpoint so that its adapter is resident in VRAM
 // for low-latency inference without reloading base weights between requests.
+// Endpoints are created under the AI Project workspace (not Hub) as required by Azure ML.
 module loraInferences 'modules/lora-inference.bicep' = [for fa in foundryAppNames: {
   name: 'lora-inference-${fa}-${suffix}'
   params: {
@@ -229,7 +230,7 @@ module loraInferences 'modules/lora-inference.bicep' = [for fa in foundryAppName
     projectName: projectName
     uniqueSuffix: uniqueSuffix
     tags: tags
-    hubId: aiHub.outputs.hubId
+    workspaceId: aiProject.outputs.projectId
     aiServicesAccountId: aiServices.outputs.accountId
     appName: fa
   }
@@ -238,6 +239,7 @@ module loraInferences 'modules/lora-inference.bicep' = [for fa in foundryAppName
 // Create Foundry-hosted C-suite agent endpoints (one per foundryAppNames entry)
 // Each agent endpoint connects to its dedicated LoRA inference endpoint and uses the
 // per-agent LoRA adapter model registered in the Model Registry.
+// Endpoints are created under the AI Project workspace (not Hub) as required by Azure ML.
 module foundryApps 'modules/foundry-app.bicep' = [for (fa, i) in foundryAppNames: {
   name: 'foundry-${fa}-${suffix}'
   params: {
@@ -246,7 +248,7 @@ module foundryApps 'modules/foundry-app.bicep' = [for (fa, i) in foundryAppNames
     projectName: projectName
     uniqueSuffix: uniqueSuffix
     tags: tags
-    hubId: aiHub.outputs.hubId
+    workspaceId: aiProject.outputs.projectId
     aiServicesAccountId: aiServices.outputs.accountId
     appName: fa
     // LoRA adapter model registered in the Model Registry for this agent

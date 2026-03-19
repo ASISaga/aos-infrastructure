@@ -50,6 +50,15 @@ resource modelRegistry 'Microsoft.MachineLearningServices/registries@2024-10-01'
             }
           }
         ]
+        // Azure ML Registry requires ACR details for each registered region.
+        // Premium SKU is required for the system-created registry ACR account.
+        acrDetails: [
+          {
+            systemCreatedAcrAccount: {
+              acrAccountSku: 'Premium'
+            }
+          }
+        ]
       }
     ]
   }

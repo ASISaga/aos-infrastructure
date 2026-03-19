@@ -567,19 +567,17 @@ class InfrastructureManager:
         if not self.config.template:
             print("  No template specified; skipping lint.")
             return True
-        result = self._run(["az", "bicep", "build", "--file", self.config.template])
+        result = self._run(["az", "bicep", "build", "--file", self.config.template], stream=True)
         if result.returncode != 0:
-            error_detail = (result.stderr or result.stdout or "no details available").strip()
-            print(f"  Lint error: {error_detail}", file=sys.stderr)
+            print("  Lint failed — see output above.", file=sys.stderr)
         return result.returncode == 0
 
     def _validate(self) -> bool:
         """Run ``az deployment group validate``."""
         cmd = self._deployment_cmd("validate")
-        result = self._run(cmd)
+        result = self._run(cmd, stream=True)
         if result.returncode != 0:
-            error_detail = (result.stderr or result.stdout or "no details available").strip()
-            print(f"  Validate error: {error_detail}", file=sys.stderr)
+            print("  Validate failed — see output above.", file=sys.stderr)
         return result.returncode == 0
 
     def _what_if(self) -> bool:
@@ -636,14 +634,27 @@ class InfrastructureManager:
             )
 
     def _deploy(self) -> bool:
-        """Run ``az deployment group create``."""
-        cmd = self._deployment_cmd("create")
-        result = self._run(cmd)
-        if result.returncode == 0:
-            return True
-        error_detail = (result.stderr or result.stdout or "no details available").strip()
-        print(f"  Deploy error: {error_detail}", file=sys.stderr)
-        return False
+        """Run ``az deployment group create`` with streaming output for module-wise feedback.
+
+        Streaming (no ``capture_output``) lets the Azure CLI emit per-resource status
+        lines in real-time so that each Bicep module's provisioning state is visible
+        in the GitHub Actions workflow log as it progresses.
+        """
+        # Build deploy command without --output json to avoid a large JSON blob at the end;
+        # per-resource progress is streamed directly to the workflow log.
+        cmd = self._deployment_cmd("create", output_format="none")
+        print(
+            f"  🚀 Starting ARM deployment to '{self.config.resource_group}' "
+            f"— per-module progress streamed below…"
+        )
+        result = self._run(cmd, stream=True)
+        if result.returncode != 0:
+            print(
+                f"  ❌ Deployment failed (exit code {result.returncode}) — see output above.",
+                file=sys.stderr,
+            )
+            return False
+        return True
 
     def _health_check(self) -> bool:
         """Verify key resources exist and are in a healthy state."""
@@ -728,13 +739,23 @@ class InfrastructureManager:
 
     _SHA_RE = re.compile(r"^[a-fA-F0-9]{7,40}$")
 
-    def _deployment_cmd(self, action: str) -> list[str]:
-        """Build the ``az deployment group <action>`` command list."""
+    def _deployment_cmd(self, action: str, *, output_format: str = "json") -> list[str]:
+        """Build the ``az deployment group <action>`` command list.
+
+        Parameters
+        ----------
+        action:
+            ARM deployment sub-command: ``validate``, ``what-if``, or ``create``.
+        output_format:
+            Azure CLI ``--output`` format.  Use ``"json"`` (default) when the caller
+            needs to parse stdout, or ``"none"`` for streaming deploys where the
+            per-resource progress messages are more useful than a JSON blob.
+        """
         cmd = [
             "az", "deployment", "group", action,
             "--resource-group", self.config.resource_group,
             "--template-file", self.config.template,
-            "--output", "json",
+            "--output", output_format,
         ]
         if self.config.parameters_file:
             cmd += ["--parameters", self.config.parameters_file]
@@ -764,9 +785,29 @@ class InfrastructureManager:
         return result.stdout
 
     @staticmethod
-    def _run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
-        """Execute a command and return the completed process."""
-        return subprocess.run(cmd, capture_output=True, text=True)  # noqa: S603
+    def _run(cmd: list[str], *, stream: bool = False) -> subprocess.CompletedProcess[str]:
+        """Execute a command and return the completed process.
+
+        Parameters
+        ----------
+        cmd:
+            Command and arguments to execute.
+        stream:
+            When ``True``, output is **not** captured — stdout and stderr flow
+            directly to the caller's terminal (and to the GitHub Actions log via
+            ``tee``).  This enables real-time, module-wise deployment feedback.
+            When ``False`` (default), output is captured and available via
+            ``result.stdout`` / ``result.stderr``.
+
+        Notes
+        -----
+        ``check=False`` (the subprocess default) is used in both branches so that
+        non-zero exit codes are returned to the caller rather than raising an
+        exception; each call site is responsible for inspecting ``returncode``.
+        """
+        if stream:
+            return subprocess.run(cmd, text=True, check=False)  # noqa: S603
+        return subprocess.run(cmd, capture_output=True, text=True, check=False)  # noqa: S603
 
     def _audit(self, action: str, data: dict[str, Any]) -> None:
         """Write an audit-log entry as a JSON file."""

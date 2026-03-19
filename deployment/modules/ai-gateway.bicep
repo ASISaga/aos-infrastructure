@@ -38,7 +38,31 @@ var publisherEmail = 'noreply@${projectName}.io'
 
 // Rate-limit policy — tokens-per-minute throttling to protect backend AI Services
 // The OpenID config URL uses environment().authentication.loginEndpoint for cloud compatibility.
-var rateLimitPolicyTemplate = '''<policies>
+// Consumption SKU supports per-subscription rate-limit only; key-based rate limiting requires
+// Developer/Standard/Premium SKU.  The appropriate policy is selected based on the SKU.
+var rateLimitPolicyConsumptionTemplate = '''<policies>
+  <inbound>
+    <base />
+    <rate-limit calls="60" renewal-period="60" />
+    <validate-jwt header-name="Authorization" failed-validation-httpcode="401" require-scheme="Bearer">
+      <!-- Configure issuer and audience per tenant; stub shown for illustrative purposes -->
+      <openid-config url="{LOGIN_ENDPOINT}common/v2.0/.well-known/openid-configuration" />
+    </validate-jwt>
+    <set-header name="api-key" exists-action="delete" />
+    <set-backend-service base-url="{0}" />
+  </inbound>
+  <backend>
+    <base />
+  </backend>
+  <outbound>
+    <base />
+  </outbound>
+  <on-error>
+    <base />
+  </on-error>
+</policies>'''
+
+var rateLimitPolicyDeveloperTemplate = '''<policies>
   <inbound>
     <base />
     <rate-limit-by-key calls="60" renewal-period="60"
@@ -62,7 +86,13 @@ var rateLimitPolicyTemplate = '''<policies>
     <base />
   </on-error>
 </policies>'''
-var rateLimitPolicy = replace(rateLimitPolicyTemplate, '{LOGIN_ENDPOINT}', az.environment().authentication.loginEndpoint)
+
+// Select policy template based on SKU:
+// - Consumption SKU: supports only per-subscription rate-limit (not key-based)
+// - Developer / Standard / Premium SKU: supports rate-limit-by-key (custom counter key)
+// AOS uses Consumption for dev/staging and Developer for prod, so this covers all cases.
+var selectedPolicyTemplate = skuName == 'Consumption' ? rateLimitPolicyConsumptionTemplate : rateLimitPolicyDeveloperTemplate
+var rateLimitPolicy = replace(selectedPolicyTemplate, '{LOGIN_ENDPOINT}', az.environment().authentication.loginEndpoint)
 
 // ====================================================================
 // Resources

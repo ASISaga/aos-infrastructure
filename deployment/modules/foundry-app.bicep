@@ -30,8 +30,8 @@ param uniqueSuffix string
 @description('Resource tags')
 param tags object = {}
 
-@description('AI Hub workspace resource ID (parent for the endpoint)')
-param hubId string
+@description('AI Project workspace resource ID (parent for the endpoint). Must be a Project-kind workspace — Hub workspaces do not support online endpoint creation.')
+param workspaceId string
 
 @description('AI Services account resource ID (compute backbone)')
 param aiServicesAccountId string
@@ -60,7 +60,7 @@ var deploymentName = '${appName}-deployment'
 // ====================================================================
 
 resource endpoint 'Microsoft.MachineLearningServices/workspaces/onlineEndpoints@2024-10-01' = {
-  name: '${split(hubId, '/')[8]}/${endpointName}'
+  name: '${split(workspaceId, '/')[8]}/${endpointName}'
   location: location
   tags: tags
   kind: 'Managed'
