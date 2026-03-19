@@ -27,7 +27,6 @@ resource hostnameBindingWithSsl 'Microsoft.Web/sites/hostNameBindings@2023-12-01
   properties: {
     sslState: 'SniEnabled'
     thumbprint: thumbprint
-    hostNameType: 'Verified'
   }
 }
 

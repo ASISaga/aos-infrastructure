@@ -584,6 +584,21 @@ class TestSDKBridge:
                 "C-suite agents are Foundry Agent Service endpoints, not Function Apps"
             )
 
+    def test_function_app_hostname_bindings_do_not_set_host_name_type(self) -> None:
+        """Azure hostname binding resources must not set unsupported hostNameType properties."""
+        from pathlib import Path
+
+        deployment_root = Path(__file__).resolve().parent.parent
+        for relative_path in (
+            "modules/functionapp.bicep",
+            "modules/functionapp-ssl.bicep",
+        ):
+            template = (deployment_root / relative_path).read_text(encoding="utf-8")
+            assert "hostNameType:" not in template, (
+                f"{relative_path} must not set hostNameType on Microsoft.Web/sites/hostNameBindings "
+                "resources because Azure rejects that property during Function App provisioning"
+            )
+
 
 # ====================================================================
 # KernelBridge — unit tests
