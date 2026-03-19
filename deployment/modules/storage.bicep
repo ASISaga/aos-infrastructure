@@ -63,4 +63,4 @@ resource aosStateStoreTable 'Microsoft.Storage/storageAccounts/tableServices/tab
 
 output storageAccountName string = storageAccount.name
 output storageAccountId string = storageAccount.id
-output tableServiceUri string = 'https://${storageAccount.name}.table.${environment().suffixes.storage}'
+output tableServiceUri string = 'https://${storageAccount.name}.table.${az.environment().suffixes.storage}'

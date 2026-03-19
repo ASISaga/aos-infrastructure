@@ -62,7 +62,7 @@ var rateLimitPolicyTemplate = '''<policies>
     <base />
   </on-error>
 </policies>'''
-var rateLimitPolicy = replace(rateLimitPolicyTemplate, '{LOGIN_ENDPOINT}', environment().authentication.loginEndpoint)
+var rateLimitPolicy = replace(rateLimitPolicyTemplate, '{LOGIN_ENDPOINT}', az.environment().authentication.loginEndpoint)
 
 // ====================================================================
 // Resources
