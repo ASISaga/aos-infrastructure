@@ -45,7 +45,9 @@ resource modelRegistry 'Microsoft.MachineLearningServices/registries@2024-10-01'
         location: location
         storageAccountDetails: [
           {
-            storageAccountHnsEnabled: false
+            systemCreatedStorageAccount: {
+              storageAccountHnsEnabled: false
+            }
           }
         ]
       }
