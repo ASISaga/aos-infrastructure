@@ -34,6 +34,9 @@ param appName string
 @description('VM instance type for the managed online deployment (e.g. Standard_NC24ads_A100_v4 for Llama-70B).')
 param instanceType string = 'Standard_NC24ads_A100_v4'
 
+@description('Base model asset ID from an Azure ML registry. Defaults to Llama-3.3-70B-Instruct version 9 from the azureml-meta registry (verified available in eastus2 for fine-tuning / chat-completion LoRA adapters).')
+param baseModelId string = 'azureml://registries/azureml-meta/models/Llama-3.3-70B-Instruct/versions/9'
+
 // ====================================================================
 // Variables
 // ====================================================================
@@ -47,7 +50,6 @@ param instanceType string = 'Standard_NC24ads_A100_v4'
 var endpointSuffix = take(uniqueString(resourceGroup().id, projectName, environment, appName), 8)
 var endpointName = 'ep-${appName}-${environment}-${endpointSuffix}'
 var deploymentName = '${appName}-lora'
-var baseModelId = 'azureml://registries/azureml-meta/models/Meta-Llama-3.3-70B-Instruct/versions/1'
 
 // ====================================================================
 // Managed Online Endpoint
@@ -85,7 +87,7 @@ resource llamaDeployment 'Microsoft.MachineLearningServices/workspaces/onlineEnd
     endpointComputeType: 'Managed'
     model: baseModelId
     instanceType: instanceType
-    description: 'meta-llama/Llama-3.3-70B-Instruct — Multi-LoRA adapter deployment for ${appName}'
+    description: 'Llama-3.3-70B-Instruct v9 — Multi-LoRA adapter deployment for ${appName}'
     scaleSettings: {
       scaleType: 'Default'
     }

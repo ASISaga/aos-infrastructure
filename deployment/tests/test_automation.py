@@ -684,6 +684,40 @@ class TestSDKBridge:
             "Azure ML requires names ≤ 32 characters."
         )
 
+    def test_lora_base_model_id_uses_correct_registry_version(self) -> None:
+        """lora-inference.bicep must reference the Llama-3.3-70B-Instruct model (versions/9)
+        from the azureml-meta registry — verified available in eastus2 for the
+        fine-tuning / chat-completion LoRA adapter task.
+
+        The model name is 'Llama-3.3-70B-Instruct' (no 'Meta-' prefix) and the
+        verified available version is 9.
+        """
+        import re
+        from pathlib import Path
+
+        deployment_root = Path(__file__).resolve().parent.parent
+        template = (deployment_root / "modules/lora-inference.bicep").read_text(encoding="utf-8")
+
+        # Must NOT use the old 'Meta-' prefixed name — that asset is not available.
+        assert "Meta-Llama-3.3-70B-Instruct" not in template, (
+            "lora-inference.bicep must not reference 'Meta-Llama-3.3-70B-Instruct' — "
+            "the correct model name in the azureml-meta registry is 'Llama-3.3-70B-Instruct' "
+            "(without the 'Meta-' prefix)."
+        )
+
+        # Must reference the verified-available version 9.
+        assert re.search(r"Llama-3\.3-70B-Instruct/versions/9\b", template), (
+            "lora-inference.bicep must reference Llama-3.3-70B-Instruct/versions/9 "
+            "from the azureml-meta registry — this is the version verified available "
+            "in eastus2 for fine-tuning / chat-completion LoRA adapter creation."
+        )
+
+        # Must still use the azureml-meta registry.
+        assert "azureml://registries/azureml-meta/models/Llama-3.3-70B-Instruct" in template, (
+            "lora-inference.bicep must reference Llama-3.3-70B-Instruct from the "
+            "azureml-meta registry."
+        )
+
 
 # ====================================================================
 # KernelBridge — unit tests
