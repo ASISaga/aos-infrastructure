@@ -38,7 +38,14 @@ param instanceType string = 'Standard_NC24ads_A100_v4'
 // Variables
 // ====================================================================
 
-var endpointName = 'ep-${appName}-${projectName}-${environment}-${take(uniqueSuffix, 6)}'
+// Azure ML online endpoint names are globally unique per region — a short 6-char suffix derived
+// from the resource-group-level uniqueSuffix is insufficient to prevent cross-subscription
+// collisions. We recompute a per-agent hash here (including appName) and take 8 characters to
+// provide adequate uniqueness while staying within the 32-character Azure ML name limit.
+// The projectName is still part of the hash input but is omitted from the visible name to keep
+// the full name ≤ 32 chars.
+var endpointSuffix = take(uniqueString(resourceGroup().id, projectName, environment, appName), 8)
+var endpointName = 'ep-${appName}-${environment}-${endpointSuffix}'
 var deploymentName = '${appName}-lora'
 var baseModelId = 'azureml://registries/azureml-meta/models/Meta-Llama-3.3-70B-Instruct/versions/1'
 

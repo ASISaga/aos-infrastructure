@@ -622,6 +622,68 @@ class TestSDKBridge:
                 "BadRequest from Azure ML management frontend when used with endpointComputeType: 'Managed'."
             )
 
+    def test_online_endpoint_name_uses_per_agent_hash_for_global_uniqueness(self) -> None:
+        """Azure ML online endpoint names must be globally unique within a region.
+
+        The old formula used only 6 chars of entropy shared across all agents
+        (uniqueSuffix did not include appName), which caused BadRequest / name-collision
+        errors when deploying to a region that already had an endpoint with the same name
+        (e.g. from another subscription).
+
+        The fix: compute a per-agent hash via
+        uniqueString(resourceGroup().id, projectName, environment, appName) and take 8 chars.
+        This provides stronger uniqueness per agent and per resource-group while keeping the
+        name within Azure ML's 32-character limit.
+        """
+        import re
+        from pathlib import Path
+
+        deployment_root = Path(__file__).resolve().parent.parent
+        for relative_path in (
+            "modules/lora-inference.bicep",
+            "modules/foundry-app.bicep",
+        ):
+            template = (deployment_root / relative_path).read_text(encoding="utf-8")
+
+            # Must use per-agent hash that includes appName — prevents collisions when
+            # multiple agents share the same resource-group-level uniqueSuffix.
+            assert "uniqueString(resourceGroup().id, projectName, environment, appName)" in template, (
+                f"{relative_path} must derive the endpoint suffix from a per-agent hash that "
+                "includes appName: uniqueString(resourceGroup().id, projectName, environment, appName). "
+                "Azure ML endpoint names are globally unique per region — a hash that omits appName "
+                "produces identical suffixes for all agents and is not unique enough to avoid collisions."
+            )
+
+            # Must take at least 8 characters for adequate entropy (≥8 base-36 chars ≈ 4×10¹²).
+            match = re.search(r"take\(uniqueString\(resourceGroup\(\)\.id.*?appName\),\s*(\d+)\)", template)
+            assert match is not None, (
+                f"{relative_path}: could not find take(uniqueString(...appName...), N) pattern"
+            )
+            suffix_len = int(match.group(1))
+            assert suffix_len >= 8, (
+                f"{relative_path} takes only {suffix_len} chars from the endpoint suffix — "
+                "use at least 8 to reduce cross-region name collision probability."
+            )
+
+            # Endpoint name must not embed projectName in the visible portion; it is already
+            # included in the hash, and omitting it keeps the name within the 32-char limit.
+            assert "ep-${appName}-${projectName}-${environment}" not in template, (
+                f"{relative_path} must not include projectName in the visible endpoint name — "
+                "it inflates the name length unnecessarily (projectName is already in the hash)."
+            )
+
+        # Verify that the longest possible name (cso-agent / cmo-agent + 'staging' + 8-char suffix)
+        # stays within the 32-character Azure ML limit.
+        longest_agent = "cso-agent"   # 9 chars — same as ceo/cfo/cto/cmo/cso
+        longest_env = "staging"        # 7 chars
+        suffix_chars = 8
+        # Formula: 'ep-' + appName + '-' + environment + '-' + suffix
+        max_len = len(f"ep-{longest_agent}-{longest_env}-{'x' * suffix_chars}")
+        assert max_len <= 32, (
+            f"Endpoint name with longest agent/env would be {max_len} chars — "
+            "Azure ML requires names ≤ 32 characters."
+        )
+
 
 # ====================================================================
 # KernelBridge — unit tests
