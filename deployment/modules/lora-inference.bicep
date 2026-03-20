@@ -1,10 +1,10 @@
 // LoRA Inference module — Llama-3.3-70B-Instruct Managed Online Endpoint with Multi-LoRA support
 //
-// Deploys a per-agent LoRA-enabled endpoint backed by the Llama-3.3-70B-Instruct base model.
-// One instance of this module is provisioned per C-suite agent (ceo-agent, cfo-agent, etc.)
-// so that each agent endpoint carries its own LoRA adapter at inference time without
-// reloading base weights from disk between requests (the single VM replica keeps weights
-// resident in VRAM while the endpoint is running).
+// Deploys a SINGLE shared endpoint backed by the Llama-3.3-70B-Instruct base model.
+// All C-suite agents (ceo-agent, cfo-agent, etc.) share this one endpoint; each agent
+// specifies its own LoRA adapter at inference time via the adapter_id field in the
+// request body. Base model weights remain resident in VRAM across all agent requests,
+// eliminating per-agent endpoint overhead while keeping adapter-level isolation.
 //
 // NOTE: Online endpoints must be created under a Project workspace, not a Hub workspace.
 // Pass aiProject.outputs.projectId as workspaceId from the parent template.
@@ -28,8 +28,8 @@ param tags object
 @description('AI Project workspace resource ID (parent for the endpoint). Must be a Project-kind workspace — Hub workspaces do not support online endpoint creation.')
 param workspaceId string
 
-@description('Agent application name for per-agent LoRA adapter deployment (e.g. ceo-agent). Each C-suite agent gets its own LoRA-enabled endpoint backed by the shared Llama base model.')
-param appName string
+@description('List of C-suite agent application names that will share this endpoint (e.g. [\'ceo-agent\', \'cfo-agent\']). Used in the deployment description to identify which agents route through this endpoint. All agents differentiate via their LoRA adapter ID at inference time.')
+param appNames array
 
 @description('VM instance type for the managed online deployment (e.g. Standard_NC24ads_A100_v4 for Llama-70B).')
 param instanceType string = 'Standard_NC24ads_A100_v4'
@@ -41,18 +41,15 @@ param baseModelId string = 'azureml://registries/azureml-meta/models/Llama-3.3-7
 // Variables
 // ====================================================================
 
-// Azure ML online endpoint names are globally unique per region — a short 6-char suffix derived
-// from the resource-group-level uniqueSuffix is insufficient to prevent cross-subscription
-// collisions. We recompute a per-agent hash here (including appName) and take 8 characters to
-// provide adequate uniqueness while staying within the 32-character Azure ML name limit.
-// The projectName is still part of the hash input but is omitted from the visible name to keep
-// the full name ≤ 32 chars.
-var endpointSuffix = take(uniqueString(resourceGroup().id, projectName, environment, appName), 8)
-var endpointName = 'ep-${appName}-${environment}-${endpointSuffix}'
-var deploymentName = '${appName}-lora'
+// Shared endpoint suffix — derived from resource group, project name, and environment.
+// No per-agent component is needed because there is only one endpoint for all agents.
+// 8 characters provide adequate uniqueness while keeping the full name ≤ 32 chars.
+var endpointSuffix = take(uniqueString(resourceGroup().id, projectName, environment), 8)
+var endpointName = 'ep-lora-shared-${environment}-${endpointSuffix}'
+var deploymentName = 'lora-base-deployment'
 
 // ====================================================================
-// Managed Online Endpoint
+// Managed Online Endpoint (shared by all C-suite agents)
 // ====================================================================
 
 resource llamaEndpoint 'Microsoft.MachineLearningServices/workspaces/onlineEndpoints@2024-10-01' = {
@@ -63,14 +60,16 @@ resource llamaEndpoint 'Microsoft.MachineLearningServices/workspaces/onlineEndpo
     type: 'SystemAssigned'
   }
   properties: {
-    description: 'Llama-3.3-70B-Instruct Multi-LoRA inference endpoint for ${appName} (${environment})'
+    description: 'Llama-3.3-70B-Instruct shared Multi-LoRA inference endpoint for all C-suite agents (${environment})'
     authMode: 'Key'
     publicNetworkAccess: environment == 'prod' ? 'Disabled' : 'Enabled'
   }
 }
 
 // ====================================================================
-// Base Model Deployment — Managed Online Deployment, Multi-LoRA enabled
+// Base Model Deployment — single Managed Online Deployment, Multi-LoRA enabled.
+// All C-suite agents share this deployment; per-agent adapter selection happens
+// at inference time via the adapter_id field in the scoring request body.
 // ====================================================================
 
 resource llamaDeployment 'Microsoft.MachineLearningServices/workspaces/onlineEndpoints/deployments@2024-10-01' = {
@@ -87,7 +86,7 @@ resource llamaDeployment 'Microsoft.MachineLearningServices/workspaces/onlineEnd
     endpointComputeType: 'Managed'
     model: baseModelId
     instanceType: instanceType
-    description: 'Llama-3.3-70B-Instruct v9 — Multi-LoRA adapter deployment for ${appName}'
+    description: 'Llama-3.3-70B-Instruct v9 — shared Multi-LoRA base deployment (agents: ${join(appNames, \', \')})'
     scaleSettings: {
       scaleType: 'Default'
     }

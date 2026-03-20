@@ -33,6 +33,10 @@ _OUTPUT_TO_ENV_MAP: dict[str, str] = {
     "aiProjectName": "AZURE_ML_PROJECT_NAME",
     "modelRegistryName": "LORA_MODEL_REGISTRY_NAME",
     "resourceGroupName": "AZURE_RESOURCE_GROUP",
+    # Single shared LoRA inference endpoint — all C-suite agents use the same endpoint
+    # and differentiate via adapter_id in the scoring request body at inference time.
+    "loraInferenceEndpointName": "LORA_INFERENCE_ENDPOINT_NAME",
+    "loraInferenceScoringUri": "LORA_INFERENCE_SCORING_URI",
 }
 
 # Environment variable prefixes used by KernelConfig
@@ -217,10 +221,11 @@ class KernelBridge:
     def _translate_outputs(outputs: dict[str, Any]) -> dict[str, str]:
         """Translate Bicep output objects to env var strings.
 
-        Scalar outputs are translated via :data:`_OUTPUT_TO_ENV_MAP`.
-        Array outputs (e.g. per-agent LoRA endpoint names and scoring URIs)
-        are serialised as JSON strings so that kernel consumers can decode
-        them with ``json.loads()``.
+        All outputs are translated via :data:`_OUTPUT_TO_ENV_MAP`.  The shared
+        LoRA inference endpoint (``loraInferenceEndpointName`` and
+        ``loraInferenceScoringUri``) are scalar strings — all C-suite agents
+        share a single endpoint and differentiate via ``adapter_id`` in the
+        scoring request body at inference time.
         """
         env_vars: dict[str, str] = {}
         for bicep_key, env_key in _OUTPUT_TO_ENV_MAP.items():
@@ -228,17 +233,5 @@ class KernelBridge:
             value = output.get("value")
             if value is not None:
                 env_vars[env_key] = str(value)
-
-        # Per-agent LoRA array outputs — serialised as JSON strings.
-        # loraInferenceEndpointNames and loraInferenceScoringUris are arrays
-        # (one entry per C-suite agent) produced by the loraInferences module loop.
-        for bicep_key, env_key in [
-            ("loraInferenceEndpointNames", "LORA_INFERENCE_ENDPOINT_NAMES"),
-            ("loraInferenceScoringUris", "LORA_INFERENCE_SCORING_URIS"),
-        ]:
-            output = outputs.get(bicep_key, {})
-            value = output.get("value")
-            if value is not None:
-                env_vars[env_key] = json.dumps(value) if isinstance(value, list) else str(value)
 
         return env_vars
