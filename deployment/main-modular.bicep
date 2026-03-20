@@ -230,7 +230,6 @@ module loraInference 'modules/lora-inference.bicep' = {
     location: locationML
     environment: environment
     projectName: projectName
-    uniqueSuffix: uniqueSuffix
     tags: tags
     workspaceId: aiProject.outputs.projectId
     appNames: foundryAppNames
@@ -247,14 +246,12 @@ module foundryApps 'modules/foundry-app.bicep' = [for (fa, i) in foundryAppNames
     location: locationML
     environment: environment
     projectName: projectName
-    uniqueSuffix: uniqueSuffix
     tags: tags
     workspaceId: aiProject.outputs.projectId
     appName: fa
     // LoRA adapter model registered in the Model Registry for this agent
     modelId: 'azureml://registries/${modelRegistry.outputs.registryName}/models/${fa}-lora-adapter/versions/1'
     skuCapacity: 1
-    loraInferenceEndpointName: loraInference.outputs.endpointName
     useNestedDeployment: useAgentNestedDeployment
     agentTemplate: agentTemplate
     agentTemplateParameters: agentTemplateParameters

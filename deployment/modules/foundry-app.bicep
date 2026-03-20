@@ -24,9 +24,6 @@ param agentTemplateParameters object = {}
 @description('Human-friendly project name (workspace name)')
 param projectName string
 
-@description('Unique suffix used to create globally-unique names')
-param uniqueSuffix string
-
 @description('Resource tags')
 param tags object = {}
 
@@ -35,9 +32,6 @@ param workspaceId string
 
 @description('Application logical name (used to derive endpoint name)')
 param appName string
-
-@description('Name of the LoRA inference endpoint provisioned for this agent (used to connect the Foundry Agent Service to its dedicated LoRA adapter deployment)')
-param loraInferenceEndpointName string
 
 @description('Model identifier (azureml://registries/... or other registry id)')
 param modelId string
