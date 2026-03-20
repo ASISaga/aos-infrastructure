@@ -220,12 +220,12 @@ module modelRegistry 'modules/model-registry.bicep' = {
   }
 }
 
-// Llama-3.3-70B-Instruct Managed Online Endpoint with Multi-LoRA support — one per C-suite agent
-// Each agent gets its own LoRA-enabled endpoint so that its adapter is resident in VRAM
-// for low-latency inference without reloading base weights between requests.
-// Endpoints are created under the AI Project workspace (not Hub) as required by Azure ML.
-module loraInferences 'modules/lora-inference.bicep' = [for fa in foundryAppNames: {
-  name: 'lora-inference-${fa}-${suffix}'
+// Single shared Llama-3.3-70B-Instruct Managed Online Endpoint with Multi-LoRA support.
+// All C-suite agents share this one endpoint; each agent specifies its own LoRA adapter
+// via the adapter_id field in the scoring request body at inference time.
+// The endpoint is created under the AI Project workspace (not Hub) as required by Azure ML.
+module loraInference 'modules/lora-inference.bicep' = {
+  name: 'lora-inference-${suffix}'
   params: {
     location: locationML
     environment: environment
@@ -233,13 +233,13 @@ module loraInferences 'modules/lora-inference.bicep' = [for fa in foundryAppName
     uniqueSuffix: uniqueSuffix
     tags: tags
     workspaceId: aiProject.outputs.projectId
-    appName: fa
+    appNames: foundryAppNames
   }
-}]
+}
 
 // Create Foundry-hosted C-suite agent endpoints (one per foundryAppNames entry)
-// Each agent endpoint connects to its dedicated LoRA inference endpoint and uses the
-// per-agent LoRA adapter model registered in the Model Registry.
+// All agents share the single LoRA inference endpoint; per-agent adapter selection
+// happens at inference time via the adapter_id in the scoring request body.
 // Endpoints are created under the AI Project workspace (not Hub) as required by Azure ML.
 module foundryApps 'modules/foundry-app.bicep' = [for (fa, i) in foundryAppNames: {
   name: 'foundry-${fa}-${suffix}'
@@ -254,7 +254,7 @@ module foundryApps 'modules/foundry-app.bicep' = [for (fa, i) in foundryAppNames
     // LoRA adapter model registered in the Model Registry for this agent
     modelId: 'azureml://registries/${modelRegistry.outputs.registryName}/models/${fa}-lora-adapter/versions/1'
     skuCapacity: 1
-    loraInferenceEndpointName: loraInferences[i].outputs.endpointName
+    loraInferenceEndpointName: loraInference.outputs.endpointName
     useNestedDeployment: useAgentNestedDeployment
     agentTemplate: agentTemplate
     agentTemplateParameters: agentTemplateParameters
@@ -391,10 +391,10 @@ output aiProjectName string = aiProject.outputs.projectName
 output aiProjectDiscoveryUrl string = aiProject.outputs.projectDiscoveryUrl
 output aiGatewayName string = aiGateway.outputs.gatewayName
 output aiGatewayUrl string = aiGateway.outputs.gatewayUrl
-// Multi-LoRA inference outputs — one endpoint per C-suite agent
+// Multi-LoRA inference outputs — single shared endpoint for all C-suite agents
 output modelRegistryName string = modelRegistry.outputs.registryName
-output loraInferenceEndpointNames array = [for (fa, i) in foundryAppNames: loraInferences[i].outputs.endpointName]
-output loraInferenceScoringUris array = [for (fa, i) in foundryAppNames: loraInferences[i].outputs.scoringUri]
+output loraInferenceEndpointName string = loraInference.outputs.endpointName
+output loraInferenceScoringUri string = loraInference.outputs.scoringUri
 // Foundry C-suite endpoints created by foundryApps module
 output foundryEndpointNames array = [for (fa, i) in foundryAppNames: foundryApps[i].outputs.endpointName]
 output foundryScoringUris array = [for (fa, i) in foundryAppNames: foundryApps[i].outputs.scoringUri]

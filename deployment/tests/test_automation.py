@@ -625,55 +625,72 @@ class TestSDKBridge:
     def test_online_endpoint_name_uses_per_agent_hash_for_global_uniqueness(self) -> None:
         """Azure ML online endpoint names must be globally unique within a region.
 
-        The old formula used only 6 chars of entropy shared across all agents
-        (uniqueSuffix did not include appName), which caused BadRequest / name-collision
-        errors when deploying to a region that already had an endpoint with the same name
-        (e.g. from another subscription).
-
-        The fix: compute a per-agent hash via
-        uniqueString(resourceGroup().id, projectName, environment, appName) and take 8 chars.
-        This provides stronger uniqueness per agent and per resource-group while keeping the
-        name within Azure ML's 32-character limit.
+        foundry-app.bicep uses a per-agent hash (includes appName) for its endpoint name.
+        lora-inference.bicep creates a single shared endpoint — its suffix is derived from
+        project/environment only (no appName), which is correct because there is only one
+        endpoint and no collision risk with other per-agent names.
         """
         import re
         from pathlib import Path
 
         deployment_root = Path(__file__).resolve().parent.parent
-        for relative_path in (
-            "modules/lora-inference.bicep",
-            "modules/foundry-app.bicep",
-        ):
-            template = (deployment_root / relative_path).read_text(encoding="utf-8")
 
-            # Must use per-agent hash that includes appName — prevents collisions when
-            # multiple agents share the same resource-group-level uniqueSuffix.
-            assert "uniqueString(resourceGroup().id, projectName, environment, appName)" in template, (
-                f"{relative_path} must derive the endpoint suffix from a per-agent hash that "
-                "includes appName: uniqueString(resourceGroup().id, projectName, environment, appName). "
-                "Azure ML endpoint names are globally unique per region — a hash that omits appName "
-                "produces identical suffixes for all agents and is not unique enough to avoid collisions."
-            )
+        # foundry-app.bicep creates one endpoint per agent — must include appName in the hash.
+        template = (deployment_root / "modules/foundry-app.bicep").read_text(encoding="utf-8")
 
-            # Must take at least 8 characters for adequate entropy (≥8 base-36 chars ≈ 4×10¹²).
-            match = re.search(r"take\(uniqueString\(resourceGroup\(\)\.id.*?appName\),\s*(\d+)\)", template)
-            assert match is not None, (
-                f"{relative_path}: could not find take(uniqueString(...appName...), N) pattern"
-            )
-            suffix_len = int(match.group(1))
-            assert suffix_len >= 8, (
-                f"{relative_path} takes only {suffix_len} chars from the endpoint suffix — "
-                "use at least 8 to reduce cross-region name collision probability."
-            )
+        assert "uniqueString(resourceGroup().id, projectName, environment, appName)" in template, (
+            "modules/foundry-app.bicep must derive the endpoint suffix from a per-agent hash that "
+            "includes appName: uniqueString(resourceGroup().id, projectName, environment, appName). "
+            "Azure ML endpoint names are globally unique per region — a hash that omits appName "
+            "produces identical suffixes for all agents and is not unique enough to avoid collisions."
+        )
 
-            # Endpoint name must not embed projectName in the visible portion; it is already
-            # included in the hash, and omitting it keeps the name within the 32-char limit.
-            assert "ep-${appName}-${projectName}-${environment}" not in template, (
-                f"{relative_path} must not include projectName in the visible endpoint name — "
-                "it inflates the name length unnecessarily (projectName is already in the hash)."
-            )
+        # Must take at least 8 characters for adequate entropy (≥8 base-36 chars ≈ 4×10¹²).
+        match = re.search(r"take\(uniqueString\(resourceGroup\(\)\.id.*?appName\),\s*(\d+)\)", template)
+        assert match is not None, (
+            "modules/foundry-app.bicep: could not find take(uniqueString(...appName...), N) pattern"
+        )
+        suffix_len = int(match.group(1))
+        assert suffix_len >= 8, (
+            f"modules/foundry-app.bicep takes only {suffix_len} chars from the endpoint suffix — "
+            "use at least 8 to reduce cross-region name collision probability."
+        )
 
-        # Verify that the longest possible name (cso-agent / cmo-agent + 'staging' + 8-char suffix)
-        # stays within the 32-character Azure ML limit.
+        # Endpoint name must not embed projectName in the visible portion.
+        assert "ep-${appName}-${projectName}-${environment}" not in template, (
+            "modules/foundry-app.bicep must not include projectName in the visible endpoint name — "
+            "it inflates the name length unnecessarily (projectName is already in the hash)."
+        )
+
+        # lora-inference.bicep creates a SHARED endpoint — suffix must NOT include appName.
+        lora_template = (deployment_root / "modules/lora-inference.bicep").read_text(encoding="utf-8")
+        assert "uniqueString(resourceGroup().id, projectName, environment)" in lora_template, (
+            "modules/lora-inference.bicep must derive the shared endpoint suffix from "
+            "uniqueString(resourceGroup().id, projectName, environment) — no appName — "
+            "because there is exactly one shared endpoint for all C-suite agents."
+        )
+        # Shared endpoint name must embed 'lora-shared' to make its purpose clear.
+        assert "ep-lora-shared-" in lora_template, (
+            "modules/lora-inference.bicep shared endpoint name must contain 'ep-lora-shared-' "
+            "to distinguish it from per-agent foundry-app endpoints."
+        )
+        # Shared endpoint suffix must take at least 8 characters for adequate uniqueness.
+        lora_match = re.search(
+            r"take\(uniqueString\(resourceGroup\(\)\.id,\s*projectName,\s*environment\),\s*(\d+)\)",
+            lora_template,
+        )
+        assert lora_match is not None, (
+            "modules/lora-inference.bicep: could not find "
+            "take(uniqueString(resourceGroup().id, projectName, environment), N) pattern"
+        )
+        lora_suffix_len = int(lora_match.group(1))
+        assert lora_suffix_len >= 8, (
+            f"modules/lora-inference.bicep takes only {lora_suffix_len} chars from the shared "
+            "endpoint suffix — use at least 8 to reduce cross-region name collision probability."
+        )
+
+        # Verify that the longest possible foundry-app endpoint name
+        # (cso-agent / cmo-agent + 'staging' + 8-char suffix) stays within the 32-char limit.
         longest_agent = "cso-agent"   # 9 chars — same as ceo/cfo/cto/cmo/cso
         longest_env = "staging"        # 7 chars
         suffix_chars = 8
@@ -681,6 +698,12 @@ class TestSDKBridge:
         max_len = len(f"ep-{longest_agent}-{longest_env}-{'x' * suffix_chars}")
         assert max_len <= 32, (
             f"Endpoint name with longest agent/env would be {max_len} chars — "
+            "Azure ML requires names ≤ 32 characters."
+        )
+        # Shared LoRA endpoint: 'ep-lora-shared-' + environment + '-' + 8-char suffix
+        lora_shared_max_len = len(f"ep-lora-shared-{longest_env}-{'x' * suffix_chars}")
+        assert lora_shared_max_len <= 32, (
+            f"Shared LoRA endpoint name with longest env would be {lora_shared_max_len} chars — "
             "Azure ML requires names ≤ 32 characters."
         )
 
@@ -734,9 +757,12 @@ class TestKernelBridge:
         assert "aiProjectDiscoveryUrl" in _OUTPUT_TO_ENV_MAP
         assert "keyVaultName" in _OUTPUT_TO_ENV_MAP
         assert "serviceBusNamespace" in _OUTPUT_TO_ENV_MAP
-        # loraInferenceScoringUri was renamed to the plural array output; the scalar
-        # key must NOT be in the map — per-agent LoRA outputs are handled separately.
-        assert "loraInferenceScoringUri" not in _OUTPUT_TO_ENV_MAP
+        # Shared LoRA endpoint outputs are now scalar strings (single endpoint for all agents).
+        assert "loraInferenceEndpointName" in _OUTPUT_TO_ENV_MAP
+        assert "loraInferenceScoringUri" in _OUTPUT_TO_ENV_MAP
+        # Old per-agent array keys must NOT be present — they were replaced by scalar outputs.
+        assert "loraInferenceEndpointNames" not in _OUTPUT_TO_ENV_MAP
+        assert "loraInferenceScoringUris" not in _OUTPUT_TO_ENV_MAP
         assert "modelRegistryName" in _OUTPUT_TO_ENV_MAP
 
     def test_translate_outputs_standard(self, kb: KernelBridge) -> None:
@@ -758,36 +784,49 @@ class TestKernelBridge:
         env_vars = KernelBridge._translate_outputs({})
         assert env_vars == {}
 
-    def test_translate_outputs_lora_array(self, kb: KernelBridge) -> None:
-        """Per-agent LoRA array outputs are serialised as JSON strings."""
-        import json
+    def test_translate_outputs_lora_shared_endpoint(self, kb: KernelBridge) -> None:
+        """Shared LoRA endpoint outputs are translated as scalar strings.
+
+        All C-suite agents share a single endpoint; per-agent adapter selection
+        happens via adapter_id in the scoring request body at inference time.
+        """
         outputs = {
-            "loraInferenceEndpointNames": {
-                "value": [
-                    "ep-ceo-agent-aos-prod-xyz",
-                    "ep-cfo-agent-aos-prod-xyz",
-                    "ep-cto-agent-aos-prod-xyz",
-                    "ep-cso-agent-aos-prod-xyz",
-                    "ep-cmo-agent-aos-prod-xyz",
-                ]
+            "loraInferenceEndpointName": {
+                "value": "ep-lora-shared-prod-abcd1234",
             },
-            "loraInferenceScoringUris": {
-                "value": [
-                    "https://ep-ceo-agent-aos-prod-xyz.eastus2.inference.ml.azure.com/score",
-                    "https://ep-cfo-agent-aos-prod-xyz.eastus2.inference.ml.azure.com/score",
-                    "https://ep-cto-agent-aos-prod-xyz.eastus2.inference.ml.azure.com/score",
-                    "https://ep-cso-agent-aos-prod-xyz.eastus2.inference.ml.azure.com/score",
-                    "https://ep-cmo-agent-aos-prod-xyz.eastus2.inference.ml.azure.com/score",
-                ]
+            "loraInferenceScoringUri": {
+                "value": "https://ep-lora-shared-prod-abcd1234.eastus2.inference.ml.azure.com/score",
             },
         }
         env_vars = KernelBridge._translate_outputs(outputs)
-        endpoint_names = json.loads(env_vars["LORA_INFERENCE_ENDPOINT_NAMES"])
-        scoring_uris = json.loads(env_vars["LORA_INFERENCE_SCORING_URIS"])
-        assert len(endpoint_names) == 5
-        assert "ep-ceo-agent-aos-prod-xyz" in endpoint_names
-        assert len(scoring_uris) == 5
-        assert all(u.startswith("https://ep-") and u.endswith("/score") for u in scoring_uris)
+        assert env_vars["LORA_INFERENCE_ENDPOINT_NAME"] == "ep-lora-shared-prod-abcd1234"
+        assert env_vars["LORA_INFERENCE_SCORING_URI"] == (
+            "https://ep-lora-shared-prod-abcd1234.eastus2.inference.ml.azure.com/score"
+        )
+
+    def test_translate_outputs_old_per_agent_lora_arrays_are_ignored(self, kb: KernelBridge) -> None:
+        """Old per-agent array LoRA keys must not produce any env vars.
+
+        The previous architecture emitted loraInferenceEndpointNames (array) and
+        loraInferenceScoringUris (array); these were replaced by scalar outputs.
+        If old-format data is present (e.g. from a stale deployment), it must be
+        silently ignored — no LORA_INFERENCE_ENDPOINT_NAMES or LORA_INFERENCE_SCORING_URIS
+        keys should appear in the translated env vars.
+        """
+        outputs = {
+            "loraInferenceEndpointNames": {
+                "value": ["ep-ceo-agent-prod-xyz", "ep-cfo-agent-prod-xyz"],
+            },
+            "loraInferenceScoringUris": {
+                "value": [
+                    "https://ep-ceo-agent-prod-xyz.eastus2.inference.ml.azure.com/score",
+                    "https://ep-cfo-agent-prod-xyz.eastus2.inference.ml.azure.com/score",
+                ],
+            },
+        }
+        env_vars = KernelBridge._translate_outputs(outputs)
+        assert "LORA_INFERENCE_ENDPOINT_NAMES" not in env_vars
+        assert "LORA_INFERENCE_SCORING_URIS" not in env_vars
 
     def test_validate_kernel_config_all_present(self, kb: KernelBridge) -> None:
         env_vars = {
