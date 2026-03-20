@@ -19,9 +19,6 @@ param environment string
 @description('Base project name')
 param projectName string
 
-@description('Unique suffix for globally unique names')
-param uniqueSuffix string
-
 @description('Resource tags')
 param tags object
 
@@ -86,7 +83,7 @@ resource llamaDeployment 'Microsoft.MachineLearningServices/workspaces/onlineEnd
     endpointComputeType: 'Managed'
     model: baseModelId
     instanceType: instanceType
-    description: 'Llama-3.3-70B-Instruct v9 — shared Multi-LoRA base deployment (agents: ${join(appNames, \', \')})'
+    description: 'Llama-3.3-70B-Instruct v9 — shared Multi-LoRA base deployment (agents: ${join(appNames, ', ')})'
     scaleSettings: {
       scaleType: 'Default'
     }
