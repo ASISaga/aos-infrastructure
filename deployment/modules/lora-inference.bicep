@@ -3,8 +3,8 @@
 // Deploys a per-agent LoRA-enabled endpoint backed by the Llama-3.3-70B-Instruct base model.
 // One instance of this module is provisioned per C-suite agent (ceo-agent, cfo-agent, etc.)
 // so that each agent endpoint carries its own LoRA adapter at inference time without
-// reloading base weights from disk between requests (Provisioned Throughput keeps weights
-// resident in VRAM).
+// reloading base weights from disk between requests (the single VM replica keeps weights
+// resident in VRAM while the endpoint is running).
 //
 // NOTE: Online endpoints must be created under a Project workspace, not a Hub workspace.
 // Pass aiProject.outputs.projectId as workspaceId from the parent template.
@@ -61,7 +61,7 @@ resource llamaEndpoint 'Microsoft.MachineLearningServices/workspaces/onlineEndpo
 }
 
 // ====================================================================
-// Base Model Deployment — Provisioned Throughput, Multi-LoRA enabled
+// Base Model Deployment — Managed Online Deployment, Multi-LoRA enabled
 // ====================================================================
 
 resource llamaDeployment 'Microsoft.MachineLearningServices/workspaces/onlineEndpoints/deployments@2024-10-01' = {
@@ -70,8 +70,8 @@ resource llamaDeployment 'Microsoft.MachineLearningServices/workspaces/onlineEnd
   location: location
   tags: tags
   sku: {
-    // Provisioned Throughput keeps base weights resident in VRAM
-    name: 'Provisioned'
+    // Default SKU — standard VM-backed managed online deployment (1 replica)
+    name: 'Default'
     capacity: 1
   }
   properties: {

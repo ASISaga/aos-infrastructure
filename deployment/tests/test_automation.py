@@ -599,6 +599,29 @@ class TestSDKBridge:
                 "resources because Azure rejects that property during Function App provisioning"
             )
 
+    def test_online_deployment_sku_is_default_not_provisioned(self) -> None:
+        """ManagedOnlineDeployment resources must use sku.name 'Default', not 'Provisioned'.
+
+        'Provisioned' is the SKU for Azure OpenAI / serverless Provisioned Throughput endpoints.
+        When set on a ManagedOnlineDeployment (endpointComputeType: 'Managed'), Azure ML's
+        management frontend returns BadRequest: The request is invalid.
+        The correct SKU for VM-backed managed online deployments is 'Default'.
+        """
+        from pathlib import Path
+
+        deployment_root = Path(__file__).resolve().parent.parent
+        for relative_path in (
+            "modules/lora-inference.bicep",
+            "modules/foundry-app.bicep",
+        ):
+            template = (deployment_root / relative_path).read_text(encoding="utf-8")
+            assert "name: 'Provisioned'" not in template, (
+                f"{relative_path} must not set sku.name to 'Provisioned' on "
+                "ManagedOnlineDeployment resources — use 'Default' instead. "
+                "'Provisioned' is only valid for serverless/PT endpoints and causes "
+                "BadRequest from Azure ML management frontend when used with endpointComputeType: 'Managed'."
+            )
+
 
 # ====================================================================
 # KernelBridge — unit tests
