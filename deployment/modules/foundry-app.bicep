@@ -45,7 +45,7 @@ param modelId string
 @description('VM instance type for the managed online deployment.')
 param instanceType string = 'Standard_DS3_v2'
 
-@description('Provisioned SKU capacity (1 = single replica for Provisioned sku)')
+@description('SKU capacity (number of replicas for the managed online deployment; 1 = single replica)')
 param skuCapacity int = 1
 
 // ====================================================================
@@ -83,7 +83,8 @@ resource agentDeployment 'Microsoft.MachineLearningServices/workspaces/onlineEnd
   location: location
   tags: tags
   sku: {
-    name: 'Provisioned'
+    // Default SKU — standard VM-backed managed online deployment
+    name: 'Default'
     capacity: skuCapacity
   }
   properties: {
