@@ -33,9 +33,6 @@ param tags object = {}
 @description('AI Project workspace resource ID (parent for the endpoint). Must be a Project-kind workspace — Hub workspaces do not support online endpoint creation.')
 param workspaceId string
 
-@description('AI Services account resource ID (compute backbone)')
-param aiServicesAccountId string
-
 @description('Application logical name (used to derive endpoint name)')
 param appName string
 
@@ -44,6 +41,9 @@ param loraInferenceEndpointName string
 
 @description('Model identifier (azureml://registries/... or other registry id)')
 param modelId string
+
+@description('VM instance type for the managed online deployment.')
+param instanceType string = 'Standard_DS3_v2'
 
 @description('Provisioned SKU capacity (1 = single replica for Provisioned sku)')
 param skuCapacity int = 1
@@ -63,7 +63,6 @@ resource endpoint 'Microsoft.MachineLearningServices/workspaces/onlineEndpoints@
   name: '${split(workspaceId, '/')[8]}/${endpointName}'
   location: location
   tags: tags
-  kind: 'Managed'
   identity: {
     type: 'SystemAssigned'
   }
@@ -90,16 +89,13 @@ resource agentDeployment 'Microsoft.MachineLearningServices/workspaces/onlineEnd
   properties: {
     endpointComputeType: 'Managed'
     model: modelId
+    instanceType: instanceType
     description: 'Agent deployment for ${appName}'
     scaleSettings: {
       scaleType: 'Default'
     }
     requestSettings: {
       maxConcurrentRequestsPerInstance: 4
-    }
-    properties: {
-      aiServicesAccountId: aiServicesAccountId
-      loraInferenceEndpointName: loraInferenceEndpointName
     }
   }
 }

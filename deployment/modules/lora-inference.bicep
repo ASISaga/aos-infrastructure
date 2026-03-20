@@ -28,11 +28,11 @@ param tags object
 @description('AI Project workspace resource ID (parent for the endpoint). Must be a Project-kind workspace — Hub workspaces do not support online endpoint creation.')
 param workspaceId string
 
-@description('AI Services account resource ID (compute backbone)')
-param aiServicesAccountId string
-
 @description('Agent application name for per-agent LoRA adapter deployment (e.g. ceo-agent). Each C-suite agent gets its own LoRA-enabled endpoint backed by the shared Llama base model.')
 param appName string
+
+@description('VM instance type for the managed online deployment (e.g. Standard_NC24ads_A100_v4 for Llama-70B).')
+param instanceType string = 'Standard_NC24ads_A100_v4'
 
 // ====================================================================
 // Variables
@@ -50,7 +50,6 @@ resource llamaEndpoint 'Microsoft.MachineLearningServices/workspaces/onlineEndpo
   name: '${split(workspaceId, '/')[8]}/${endpointName}'
   location: location
   tags: tags
-  kind: 'Managed'
   identity: {
     type: 'SystemAssigned'
   }
@@ -78,20 +77,13 @@ resource llamaDeployment 'Microsoft.MachineLearningServices/workspaces/onlineEnd
   properties: {
     endpointComputeType: 'Managed'
     model: baseModelId
+    instanceType: instanceType
     description: 'meta-llama/Llama-3.3-70B-Instruct — Multi-LoRA adapter deployment for ${appName}'
     scaleSettings: {
       scaleType: 'Default'
     }
     requestSettings: {
       maxConcurrentRequestsPerInstance: 8
-    }
-    // Multi-LoRA support metadata — enables adapter injection at inference time
-    // without evicting base weights from VRAM
-    properties: {
-      multiLora: 'enabled'
-      baseModelId: baseModelId
-      aiServicesAccountId: aiServicesAccountId
-      adapterName: '${appName}-lora-adapter'
     }
   }
 }

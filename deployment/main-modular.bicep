@@ -233,7 +233,6 @@ module loraInferences 'modules/lora-inference.bicep' = [for fa in foundryAppName
     uniqueSuffix: uniqueSuffix
     tags: tags
     workspaceId: aiProject.outputs.projectId
-    aiServicesAccountId: aiServices.outputs.accountId
     appName: fa
   }
 }]
@@ -251,7 +250,6 @@ module foundryApps 'modules/foundry-app.bicep' = [for (fa, i) in foundryAppNames
     uniqueSuffix: uniqueSuffix
     tags: tags
     workspaceId: aiProject.outputs.projectId
-    aiServicesAccountId: aiServices.outputs.accountId
     appName: fa
     // LoRA adapter model registered in the Model Registry for this agent
     modelId: 'azureml://registries/${modelRegistry.outputs.registryName}/models/${fa}-lora-adapter/versions/1'
