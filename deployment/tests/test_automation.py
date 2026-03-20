@@ -685,14 +685,12 @@ class TestSDKBridge:
         )
 
     def test_lora_base_model_id_uses_correct_registry_version(self) -> None:
-        """lora-inference.bicep must reference a version of Meta-Llama-3.3-70B-Instruct that
-        exists in the azureml-meta registry (versions/3, not versions/1).
+        """lora-inference.bicep must reference the Llama-3.3-70B-Instruct model (versions/9)
+        from the azureml-meta registry — verified available in eastus2 for the
+        fine-tuning / chat-completion LoRA adapter task.
 
-        The deployment in eastus2 failed with:
-          UserError: Could not find asset with ID:
-            azureml://registries/azureml-meta/models/Meta-Llama-3.3-70B-Instruct/versions/1
-        Version 1 does not exist in the azureml-meta registry for Llama 3.x models.
-        The correct and available version is 3.
+        The model name is 'Llama-3.3-70B-Instruct' (no 'Meta-' prefix) and the
+        verified available version is 9.
         """
         import re
         from pathlib import Path
@@ -700,23 +698,23 @@ class TestSDKBridge:
         deployment_root = Path(__file__).resolve().parent.parent
         template = (deployment_root / "modules/lora-inference.bicep").read_text(encoding="utf-8")
 
-        # The base model must NOT use versions/1 (does not exist in azureml-meta for Llama 3.x).
-        # Use a regex so the check is independent of surrounding quote style.
-        assert not re.search(r"Meta-Llama-3\.3-70B-Instruct/versions/1\b", template), (
-            "lora-inference.bicep must not reference versions/1 of Meta-Llama-3.3-70B-Instruct "
-            "— this version does not exist in the azureml-meta registry in eastus2 and causes "
-            "UserError: Could not find asset. Use versions/3 instead."
+        # Must NOT use the old 'Meta-' prefixed name — that asset is not available.
+        assert "Meta-Llama-3.3-70B-Instruct" not in template, (
+            "lora-inference.bicep must not reference 'Meta-Llama-3.3-70B-Instruct' — "
+            "the correct model name in the azureml-meta registry is 'Llama-3.3-70B-Instruct' "
+            "(without the 'Meta-' prefix)."
         )
 
-        # The base model must reference the correct version available in azureml-meta.
-        assert re.search(r"Meta-Llama-3\.3-70B-Instruct/versions/3\b", template), (
-            "lora-inference.bicep must reference Meta-Llama-3.3-70B-Instruct/versions/3 "
-            "from the azureml-meta registry — this is the version available in eastus2."
+        # Must reference the verified-available version 9.
+        assert re.search(r"Llama-3\.3-70B-Instruct/versions/9\b", template), (
+            "lora-inference.bicep must reference Llama-3.3-70B-Instruct/versions/9 "
+            "from the azureml-meta registry — this is the version verified available "
+            "in eastus2 for fine-tuning / chat-completion LoRA adapter creation."
         )
 
-        # The model must still use the azureml-meta registry.
-        assert "azureml://registries/azureml-meta/models/Meta-Llama-3.3-70B-Instruct" in template, (
-            "lora-inference.bicep must reference Meta-Llama-3.3-70B-Instruct from the "
+        # Must still use the azureml-meta registry.
+        assert "azureml://registries/azureml-meta/models/Llama-3.3-70B-Instruct" in template, (
+            "lora-inference.bicep must reference Llama-3.3-70B-Instruct from the "
             "azureml-meta registry."
         )
 
