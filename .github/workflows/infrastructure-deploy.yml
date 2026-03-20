@@ -148,22 +148,63 @@ jobs:
             --location "${{ inputs.location }}" \
             --geography "${{ inputs.geography }}"
 
-      - name: Execute Python orchestrator
-        id: orchestrator
+      # ── Pipeline step 1 — Resource Group ─────────────────────────────────
+      - name: Ensure Resource Group
+        id: ensure_rg
         continue-on-error: true
         env:
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
         run: |
-          if [[ "${{ needs.validate.outputs.is_dry_run }}" == "true" ]]; then
-            SUBCOMMAND="plan"
-          else
-            SUBCOMMAND="deploy"
-          fi
+          set +e
+          python3 deployment/deploy.py ensure-rg \
+            --resource-group "${{ needs.validate.outputs.resource_group }}" \
+            --location "${{ steps.region_select.outputs.primary_region }}" \
+            --environment "${{ needs.validate.outputs.environment }}" \
+            --template "${{ inputs.template || 'deployment/main-modular.bicep' }}" \
+            --allow-warnings \
+            --git-sha "${{ github.sha }}" \
+            2>&1 | tee -a orchestrator-output.log
+          EXIT_CODE=${PIPESTATUS[0]}
+          set -e
+          exit $EXIT_CODE
 
+      # ── Pipeline step 2 — Lint ────────────────────────────────────────────
+      - name: Lint Bicep Template
+        id: lint
+        if: steps.ensure_rg.outcome == 'success'
+        continue-on-error: true
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          set +e
+          python3 deployment/deploy.py lint \
+            --resource-group "${{ needs.validate.outputs.resource_group }}" \
+            --location "${{ steps.region_select.outputs.primary_region }}" \
+            --environment "${{ needs.validate.outputs.environment }}" \
+            --template "${{ inputs.template || 'deployment/main-modular.bicep' }}" \
+            --allow-warnings \
+            --git-sha "${{ github.sha }}" \
+            2>&1 | tee -a orchestrator-output.log
+          EXIT_CODE=${PIPESTATUS[0]}
+          set -e
+          exit $EXIT_CODE
+
+      # ── Pipeline step 3 — Validate ────────────────────────────────────────
+      - name: Validate ARM Template
+        id: arm_validate
+        if: steps.ensure_rg.outcome == 'success'
+        continue-on-error: true
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
           ARGS=(
-            "$SUBCOMMAND"
+            validate
             --resource-group "${{ needs.validate.outputs.resource_group }}"
             --location "${{ steps.region_select.outputs.primary_region }}"
             --location-ml "${{ steps.region_select.outputs.ml_region }}"
@@ -172,24 +213,126 @@ jobs:
             --allow-warnings
             --git-sha "${{ github.sha }}"
           )
-
           PARAMS="${{ needs.validate.outputs.parameters_file }}"
-          if [[ -n "$PARAMS" && -f "$PARAMS" ]]; then
-            ARGS+=(--parameters "$PARAMS")
-          fi
-
-          if [[ "${{ inputs.skip_health_checks }}" == "true" ]]; then
-            ARGS+=(--skip-health)
-          fi
-
+          [[ -n "$PARAMS" && -f "$PARAMS" ]] && ARGS+=(--parameters "$PARAMS")
           set +e
-          python3 deployment/deploy.py "${ARGS[@]}" 2>&1 | tee orchestrator-output.log
+          python3 deployment/deploy.py "${ARGS[@]}" 2>&1 | tee -a orchestrator-output.log
           EXIT_CODE=${PIPESTATUS[0]}
           set -e
+          exit $EXIT_CODE
 
-          echo "exit_code=${EXIT_CODE}" >> "$GITHUB_OUTPUT"
+      # ── Pipeline step 4 — What-If ─────────────────────────────────────────
+      - name: What-If Analysis
+        id: what_if
+        if: steps.ensure_rg.outcome == 'success'
+        continue-on-error: true
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          ARGS=(
+            what-if
+            --resource-group "${{ needs.validate.outputs.resource_group }}"
+            --location "${{ steps.region_select.outputs.primary_region }}"
+            --location-ml "${{ steps.region_select.outputs.ml_region }}"
+            --environment "${{ needs.validate.outputs.environment }}"
+            --template "${{ inputs.template || 'deployment/main-modular.bicep' }}"
+            --allow-warnings
+            --git-sha "${{ github.sha }}"
+          )
+          PARAMS="${{ needs.validate.outputs.parameters_file }}"
+          [[ -n "$PARAMS" && -f "$PARAMS" ]] && ARGS+=(--parameters "$PARAMS")
+          set +e
+          python3 deployment/deploy.py "${ARGS[@]}" 2>&1 | tee -a orchestrator-output.log
+          EXIT_CODE=${PIPESTATUS[0]}
+          set -e
+          exit $EXIT_CODE
+
+      # ── Pipeline step 5 — Deploy (deploy mode only) ───────────────────────
+      - name: Deploy Bicep Infrastructure
+        id: deploy_bicep
+        if: needs.validate.outputs.is_dry_run != 'true' && steps.what_if.outcome == 'success'
+        continue-on-error: true
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          ARGS=(
+            deploy-bicep
+            --resource-group "${{ needs.validate.outputs.resource_group }}"
+            --location "${{ steps.region_select.outputs.primary_region }}"
+            --location-ml "${{ steps.region_select.outputs.ml_region }}"
+            --environment "${{ needs.validate.outputs.environment }}"
+            --template "${{ inputs.template || 'deployment/main-modular.bicep' }}"
+            --allow-warnings
+            --git-sha "${{ github.sha }}"
+          )
+          PARAMS="${{ needs.validate.outputs.parameters_file }}"
+          [[ -n "$PARAMS" && -f "$PARAMS" ]] && ARGS+=(--parameters "$PARAMS")
+          set +e
+          python3 deployment/deploy.py "${ARGS[@]}" 2>&1 | tee -a orchestrator-output.log
+          EXIT_CODE=${PIPESTATUS[0]}
+          set -e
+          exit $EXIT_CODE
+
+      # ── Pipeline step 6 — Health Check (deploy mode, unless skipped) ──────
+      - name: Post-Deploy Health Check
+        id: health_check
+        if: >-
+          needs.validate.outputs.is_dry_run != 'true' &&
+          steps.deploy_bicep.outcome == 'success' &&
+          inputs.skip_health_checks != true
+        continue-on-error: true
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          set +e
+          python3 deployment/deploy.py health-check \
+            --resource-group "${{ needs.validate.outputs.resource_group }}" \
+            --location "${{ steps.region_select.outputs.primary_region }}" \
+            --environment "${{ needs.validate.outputs.environment }}" \
+            --template "${{ inputs.template || 'deployment/main-modular.bicep' }}" \
+            --allow-warnings \
+            --git-sha "${{ github.sha }}" \
+            2>&1 | tee -a orchestrator-output.log
+          EXIT_CODE=${PIPESTATUS[0]}
+          set -e
+          exit $EXIT_CODE
+
+      # ── Collect overall pipeline status ───────────────────────────────────
+      - name: Collect pipeline status
+        id: orchestrator
+        if: always()
+        continue-on-error: true
+        run: |
+          IS_DRY_RUN="${{ needs.validate.outputs.is_dry_run }}"
+          FAILED_STEPS=()
+
+          # Resource group creation is required for every pipeline mode.
+          [[ "${{ steps.ensure_rg.outcome }}" == "failure" ]] && FAILED_STEPS+=("ensure-rg")
+
+          if [[ "$IS_DRY_RUN" == "true" ]]; then
+            # Plan mode: what-if must succeed.
+            [[ "${{ steps.what_if.outcome }}" == "failure" ]] && FAILED_STEPS+=("what-if")
+          else
+            # Deploy mode: what-if and the actual deployment must succeed.
+            [[ "${{ steps.what_if.outcome }}"    == "failure" ]] && FAILED_STEPS+=("what-if")
+            [[ "${{ steps.deploy_bicep.outcome }}" == "failure" ]] && FAILED_STEPS+=("deploy-bicep")
+          fi
+
+          if [[ ${#FAILED_STEPS[@]} -gt 0 ]]; then
+            echo "❌ Failed pipeline step(s): ${FAILED_STEPS[*]}"
+            echo "exit_code=1" >> "$GITHUB_OUTPUT"
+            echo "output_file=orchestrator-output.log" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          echo "exit_code=0" >> "$GITHUB_OUTPUT"
           echo "output_file=orchestrator-output.log" >> "$GITHUB_OUTPUT"
-          exit ${EXIT_CODE}
 
       - name: Analyze orchestrator output
         id: analyze
@@ -283,6 +426,25 @@ jobs:
           echo "| Primary Region | \`${{ steps.region_select.outputs.primary_region }}\` |" >> "$GITHUB_STEP_SUMMARY"
           echo "| ML Region | \`${{ steps.region_select.outputs.ml_region }}\` |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Mode | ${{ needs.validate.outputs.is_dry_run == 'true' && 'Plan (dry-run)' || 'Deploy' }} |" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### 🔢 Pipeline Step Status" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Step | Status |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|------|--------|" >> "$GITHUB_STEP_SUMMARY"
+          step_icon() {
+            case "$1" in
+              success) echo "✅ success" ;;
+              failure) echo "❌ failed"  ;;
+              skipped) echo "⏭️ skipped" ;;
+              *)       echo "⬜ not run" ;;
+            esac
+          }
+          echo "| Resource Group | $(step_icon "${{ steps.ensure_rg.outcome }}") |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Lint           | $(step_icon "${{ steps.lint.outcome }}") |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Validate       | $(step_icon "${{ steps.arm_validate.outcome }}") |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| What-If        | $(step_icon "${{ steps.what_if.outcome }}") |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Deploy         | $(step_icon "${{ steps.deploy_bicep.outcome }}") |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Health Check   | $(step_icon "${{ steps.health_check.outcome }}") |" >> "$GITHUB_STEP_SUMMARY"
 
           if [[ -n "$WHAT_IF_CREATES" ]] && [[ "$WHAT_IF_CREATES" != "0" || "$WHAT_IF_NO_CHANGES" != "0" || "$WHAT_IF_MODIFIES" != "0" || "$WHAT_IF_DELETES" != "0" ]]; then
             echo "" >> "$GITHUB_STEP_SUMMARY"

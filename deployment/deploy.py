@@ -143,6 +143,34 @@ def _build_parser() -> argparse.ArgumentParser:
     p_scale.add_argument("--scale-settings", type=json.loads, required=True,
                          help='Scale settings as JSON: \'{"sku.capacity": 2}\'')
 
+    # ── Individual pipeline step commands ─────────────────────────────
+    # These are thin wrappers over InfrastructureManager's single-step
+    # public methods; they allow the CI workflow to call each pipeline
+    # stage as a separate named step for clear, per-stage visibility.
+    step_parent = argparse.ArgumentParser(add_help=False, parents=[parent])
+    step_parent.add_argument("--location", required=True, help="Primary Azure region")
+    step_parent.add_argument("--location-ml", default="", help="Azure ML region")
+    step_parent.add_argument("--environment", required=True, choices=["dev", "staging", "prod"])
+    step_parent.add_argument("--template", default="", help="Bicep template file path")
+    step_parent.add_argument("--parameters", default="", help="Parameters file path")
+    step_parent.add_argument("--subscription-id", default="", help="Azure subscription ID")
+    step_parent.add_argument("--git-sha", default="", help="Git commit SHA for tagging")
+    step_parent.add_argument("--allow-warnings", action="store_true", help="Continue on warnings")
+    step_parent.add_argument("--skip-health", action="store_true", help="Skip health checks")
+
+    subparsers.add_parser("ensure-rg", parents=[step_parent],
+                          help="Create/confirm resource group (pipeline step 1)")
+    subparsers.add_parser("lint", parents=[step_parent],
+                          help="Lint the Bicep template (pipeline step 2)")
+    subparsers.add_parser("validate", parents=[step_parent],
+                          help="Validate the ARM template (pipeline step 3)")
+    subparsers.add_parser("what-if", parents=[step_parent],
+                          help="Run what-if analysis (pipeline step 4)")
+    subparsers.add_parser("deploy-bicep", parents=[step_parent],
+                          help="Deploy the Bicep infrastructure (pipeline step 5)")
+    subparsers.add_parser("health-check", parents=[step_parent],
+                          help="Post-deploy health check (pipeline step 6)")
+
     # ── Cleanup ────────────────────────────────────────────────────────────
     p_delete = subparsers.add_parser("delete", parents=[parent], help="Delete resource group")
     p_delete.add_argument("--yes", action="store_true", help="Skip confirmation prompt")
@@ -156,6 +184,20 @@ def main(argv: list[str] | None = None) -> int:
     """CLI entry point."""
     parser = _build_parser()
     args = parser.parse_args(argv)
+
+    # ── Individual pipeline step commands ─────────────────────────────
+    if args.command in ("ensure-rg", "lint", "validate", "what-if", "deploy-bicep", "health-check"):
+        config = DeploymentConfig.from_args(args)
+        mgr = InfrastructureManager(config)
+        step_map = {
+            "ensure-rg":    mgr.ensure_rg,
+            "lint":         mgr.lint,
+            "validate":     mgr.validate,
+            "what-if":      mgr.what_if,
+            "deploy-bicep": mgr.deploy_bicep,
+            "health-check": mgr.health_check,
+        }
+        return 0 if step_map[args.command]() else 1
 
     # ── Pillar commands ────────────────────────────────────────────────────
     if args.command in ("deploy", "plan", "automate"):

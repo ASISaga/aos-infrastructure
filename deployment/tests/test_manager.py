@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
+from pathlib import Path
 from unittest import mock
 
 import pytest
@@ -275,3 +276,252 @@ class TestInfrastructureManager:
         result = manager.deploy()
         assert result is False
         assert mock_run.call_count == 1
+
+
+# ====================================================================
+# Single-step public method tests
+# ====================================================================
+
+
+class TestInfrastructureManagerSteps:
+    """Tests for the single-step public entrypoints added to InfrastructureManager."""
+
+    @pytest.fixture()
+    def manager(self) -> InfrastructureManager:
+        cfg = DeploymentConfig(
+            environment="dev",
+            resource_group="rg-test",
+            location="eastus",
+            template="deployment/main-modular.bicep",
+        )
+        return InfrastructureManager(cfg)
+
+    @pytest.fixture()
+    def manager_allow_warnings(self) -> InfrastructureManager:
+        cfg = DeploymentConfig(
+            environment="dev",
+            resource_group="rg-test",
+            location="eastus",
+            template="deployment/main-modular.bicep",
+            allow_warnings=True,
+        )
+        return InfrastructureManager(cfg)
+
+    # ── ensure_rg ──────────────────────────────────────────────────────
+
+    @mock.patch.object(InfrastructureManager, "_run")
+    def test_ensure_rg_delegates_to_private(
+        self, mock_run: mock.Mock, manager: InfrastructureManager
+    ) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout="{}", stderr="")
+        assert manager.ensure_rg() is True
+        mock_run.assert_called_once()
+        cmd = mock_run.call_args[0][0]
+        assert "az" in cmd and "group" in cmd and "create" in cmd
+
+    @mock.patch.object(InfrastructureManager, "_run")
+    def test_ensure_rg_returns_false_on_failure(
+        self, mock_run: mock.Mock, manager: InfrastructureManager
+    ) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="AuthFailed")
+        assert manager.ensure_rg() is False
+
+    # ── lint ───────────────────────────────────────────────────────────
+
+    @mock.patch.object(InfrastructureManager, "_run")
+    def test_lint_returns_true_on_success(
+        self, mock_run: mock.Mock, manager: InfrastructureManager
+    ) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+        assert manager.lint() is True
+
+    @mock.patch.object(InfrastructureManager, "_run")
+    def test_lint_returns_false_on_failure_without_allow_warnings(
+        self, mock_run: mock.Mock, manager: InfrastructureManager
+    ) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="error")
+        assert manager.lint() is False
+
+    @mock.patch.object(InfrastructureManager, "_run")
+    def test_lint_returns_true_on_failure_with_allow_warnings(
+        self, mock_run: mock.Mock, manager_allow_warnings: InfrastructureManager
+    ) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="warning")
+        assert manager_allow_warnings.lint() is True
+
+    # ── validate ───────────────────────────────────────────────────────
+
+    @mock.patch.object(InfrastructureManager, "_run")
+    def test_validate_returns_true_on_success(
+        self, mock_run: mock.Mock, manager: InfrastructureManager
+    ) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+        assert manager.validate() is True
+
+    @mock.patch.object(InfrastructureManager, "_run")
+    def test_validate_uses_output_format_none(
+        self, mock_run: mock.Mock, manager: InfrastructureManager
+    ) -> None:
+        """Validate must not stream a raw JSON blob — it uses --output none."""
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+        manager.validate()
+        cmd = mock_run.call_args[0][0]
+        # --output none suppresses the ARM template JSON blob
+        assert "--output" in cmd
+        output_idx = cmd.index("--output")
+        assert cmd[output_idx + 1] == "none"
+
+    @mock.patch.object(InfrastructureManager, "_run")
+    def test_validate_returns_false_on_failure_without_allow_warnings(
+        self, mock_run: mock.Mock, manager: InfrastructureManager
+    ) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="InvalidTemplate")
+        assert manager.validate() is False
+
+    @mock.patch.object(InfrastructureManager, "_run")
+    def test_validate_returns_true_on_failure_with_allow_warnings(
+        self, mock_run: mock.Mock, manager_allow_warnings: InfrastructureManager
+    ) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="warning")
+        assert manager_allow_warnings.validate() is True
+
+    # ── what_if ────────────────────────────────────────────────────────
+
+    @mock.patch.object(InfrastructureManager, "_run")
+    def test_what_if_writes_audit_on_success(
+        self, mock_run: mock.Mock, manager: InfrastructureManager, tmp_path: Path
+    ) -> None:
+        import orchestrator.core.manager as manager_module
+        what_if_json = json.dumps({
+            "changes": [
+                {"changeType": "Create", "resourceId": "/r1"},
+                {"changeType": "Modify", "resourceId": "/r2"},
+            ]
+        })
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout=what_if_json, stderr="")
+        original_audit_dir = manager_module._AUDIT_DIR
+        manager_module._AUDIT_DIR = tmp_path
+        try:
+            result = manager.what_if()
+        finally:
+            manager_module._AUDIT_DIR = original_audit_dir
+        assert result is True
+        # Audit file should have been written
+        audit_files = list(tmp_path.glob("what-if_*.json"))
+        assert len(audit_files) == 1
+        audit_data = json.loads(audit_files[0].read_text())
+        assert audit_data["action"] == "what-if"
+        assert audit_data["what_if_creates"] == 1
+        assert audit_data["what_if_modifies"] == 1
+
+    @mock.patch.object(InfrastructureManager, "_run")
+    def test_what_if_returns_false_on_failure(
+        self, mock_run: mock.Mock, manager: InfrastructureManager
+    ) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="Error")
+        assert manager.what_if() is False
+
+    # ── deploy_bicep ───────────────────────────────────────────────────
+
+    @mock.patch.object(InfrastructureManager, "_run")
+    def test_deploy_bicep_runs_az_deployment_create(
+        self, mock_run: mock.Mock, manager: InfrastructureManager
+    ) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+        assert manager.deploy_bicep() is True
+        cmd = mock_run.call_args[0][0]
+        assert "deployment" in cmd and "create" in cmd
+
+    @mock.patch.object(InfrastructureManager, "_run")
+    def test_deploy_bicep_returns_false_on_failure(
+        self, mock_run: mock.Mock, manager: InfrastructureManager
+    ) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="DeployFailed")
+        assert manager.deploy_bicep() is False
+
+    # ── health_check ───────────────────────────────────────────────────
+
+    @mock.patch.object(InfrastructureManager, "_az")
+    def test_health_check_all_succeeded(
+        self, mock_az: mock.Mock, manager: InfrastructureManager
+    ) -> None:
+        mock_az.return_value = json.dumps([
+            {"name": "storage1", "state": "Succeeded"},
+            {"name": "funcapp1", "state": "Succeeded"},
+        ])
+        assert manager.health_check() is True
+
+    @mock.patch.object(InfrastructureManager, "_az")
+    def test_health_check_resource_not_succeeded(
+        self, mock_az: mock.Mock, manager: InfrastructureManager
+    ) -> None:
+        mock_az.return_value = json.dumps([
+            {"name": "storage1", "state": "Succeeded"},
+            {"name": "funcapp1", "state": "Failed"},
+        ])
+        assert manager.health_check() is False
+
+
+# ====================================================================
+# deploy.py CLI — step subcommand tests
+# ====================================================================
+
+
+class TestDeployPyStepCommands:
+    """Tests for the individual pipeline step CLI subcommands in deploy.py."""
+
+    BASE_ARGS = [
+        "--resource-group", "rg-test",
+        "--location", "eastus",
+        "--environment", "dev",
+        "--template", "deployment/main-modular.bicep",
+    ]
+
+    def _run(self, argv: list[str]) -> int:
+        """Import and invoke deploy.main() directly."""
+        import sys
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from deploy import main  # noqa: PLC0415
+        return main(argv)
+
+    @mock.patch("orchestrator.core.manager.InfrastructureManager.ensure_rg", return_value=True)
+    def test_ensure_rg_subcommand_exits_zero(self, mock_fn: mock.Mock) -> None:
+        assert self._run(["ensure-rg"] + self.BASE_ARGS) == 0
+        mock_fn.assert_called_once()
+
+    @mock.patch("orchestrator.core.manager.InfrastructureManager.ensure_rg", return_value=False)
+    def test_ensure_rg_subcommand_exits_one_on_failure(self, mock_fn: mock.Mock) -> None:
+        assert self._run(["ensure-rg"] + self.BASE_ARGS) == 1
+
+    @mock.patch("orchestrator.core.manager.InfrastructureManager.lint", return_value=True)
+    def test_lint_subcommand_exits_zero(self, mock_fn: mock.Mock) -> None:
+        assert self._run(["lint"] + self.BASE_ARGS) == 0
+        mock_fn.assert_called_once()
+
+    @mock.patch("orchestrator.core.manager.InfrastructureManager.validate", return_value=True)
+    def test_validate_subcommand_exits_zero(self, mock_fn: mock.Mock) -> None:
+        assert self._run(["validate"] + self.BASE_ARGS) == 0
+        mock_fn.assert_called_once()
+
+    @mock.patch("orchestrator.core.manager.InfrastructureManager.what_if", return_value=True)
+    def test_what_if_subcommand_exits_zero(self, mock_fn: mock.Mock) -> None:
+        assert self._run(["what-if"] + self.BASE_ARGS) == 0
+        mock_fn.assert_called_once()
+
+    @mock.patch("orchestrator.core.manager.InfrastructureManager.deploy_bicep", return_value=True)
+    def test_deploy_bicep_subcommand_exits_zero(self, mock_fn: mock.Mock) -> None:
+        assert self._run(["deploy-bicep"] + self.BASE_ARGS) == 0
+        mock_fn.assert_called_once()
+
+    @mock.patch("orchestrator.core.manager.InfrastructureManager.health_check", return_value=True)
+    def test_health_check_subcommand_exits_zero(self, mock_fn: mock.Mock) -> None:
+        assert self._run(["health-check"] + self.BASE_ARGS) == 0
+        mock_fn.assert_called_once()
+
+    @mock.patch("orchestrator.core.manager.InfrastructureManager.what_if", return_value=False)
+    def test_what_if_subcommand_exits_one_on_failure(self, mock_fn: mock.Mock) -> None:
+        assert self._run(["what-if"] + self.BASE_ARGS) == 1
+
+    @mock.patch("orchestrator.core.manager.InfrastructureManager.deploy_bicep", return_value=False)
+    def test_deploy_bicep_subcommand_exits_one_on_failure(self, mock_fn: mock.Mock) -> None:
+        assert self._run(["deploy-bicep"] + self.BASE_ARGS) == 1

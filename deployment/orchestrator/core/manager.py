@@ -402,6 +402,63 @@ class InfrastructureManager:
         return self._run_automation_pillar()
 
     # ------------------------------------------------------------------
+    # Single-step public entrypoints
+    # ------------------------------------------------------------------
+
+    def ensure_rg(self) -> bool:
+        """Create or confirm the resource group and return the result."""
+        return self._ensure_resource_group()
+
+    def lint(self) -> bool:
+        """Lint the Bicep template.
+
+        Returns ``True`` even on failure when ``config.allow_warnings`` is set,
+        mirroring the behaviour of the full :meth:`deploy` pipeline.
+        """
+        ok = self._lint()
+        if not ok and self.config.allow_warnings:
+            print("⚠️  Lint had warnings — continuing (--allow-warnings)")
+            return True
+        return ok
+
+    def validate(self) -> bool:
+        """Validate the ARM template.
+
+        Returns ``True`` even on failure when ``config.allow_warnings`` is set,
+        mirroring the behaviour of the full :meth:`deploy` pipeline.
+        """
+        ok = self._validate()
+        if not ok and self.config.allow_warnings:
+            print("⚠️  Validate had warnings — continuing (--allow-warnings)")
+            return True
+        return ok
+
+    def what_if(self) -> bool:
+        """Run what-if analysis and write results to the audit log."""
+        ok = self._what_if()
+        if ok:
+            self._audit("what-if", {
+                "status": "success",
+                "what_if_creates": self._what_if_counts.get("create", 0),
+                "what_if_no_changes": self._what_if_counts.get("no_change", 0),
+                "what_if_modifies": self._what_if_counts.get("modify", 0),
+                "what_if_deletes": self._what_if_counts.get("delete", 0),
+            })
+        return ok
+
+    def deploy_bicep(self) -> bool:
+        """Run just the ARM deployment (``az deployment group create``).
+
+        Caller is responsible for running :meth:`ensure_rg`, :meth:`validate`,
+        and :meth:`what_if` before invoking this method.
+        """
+        return self._deploy()
+
+    def health_check(self) -> bool:
+        """Run the post-deployment health check and return the result."""
+        return self._health_check()
+
+    # ------------------------------------------------------------------
     # Private helpers — three-pillar lifecycle
     # ------------------------------------------------------------------
 
@@ -573,12 +630,19 @@ class InfrastructureManager:
         return result.returncode == 0
 
     def _validate(self) -> bool:
-        """Run ``az deployment group validate``."""
-        cmd = self._deployment_cmd("validate")
+        """Run ``az deployment group validate``.
+
+        ``--output none`` suppresses the raw ARM-template JSON blob that Azure
+        CLI would otherwise emit on success; validation errors still surface on
+        stderr.  A short success or failure line is printed for CI readability.
+        """
+        cmd = self._deployment_cmd("validate", output_format="none")
         result = self._run(cmd, stream=True)
         if result.returncode != 0:
             print("  Validate failed — see output above.", file=sys.stderr)
-        return result.returncode == 0
+            return False
+        print("  ✅ Template is valid")
+        return True
 
     def _what_if(self) -> bool:
         """Run ``az deployment group what-if``.
