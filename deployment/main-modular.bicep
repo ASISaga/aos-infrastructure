@@ -55,6 +55,9 @@ param governanceAllowedLocations array = [
   'northeurope'
 ]
 
+@description('When true, deploy and assign the custom AI SKU deny policy that enforces GlobalStandard (serverless, scale-to-zero) and Standard SKUs only — denying Provisioned / PTU SKUs for Azure AI model deployments.')
+param enableAiSkuGovernance bool = true
+
 @description('Monthly budget limit in the subscription currency (0 = disabled).')
 param monthlyBudgetAmount int = 0
 
@@ -350,6 +353,7 @@ module governancePolicy 'modules/policy.bicep' = if (enableGovernancePolicies) {
   params: {
     environment: environment
     allowedLocations: governanceAllowedLocations
+    enableAiSkuGovernance: enableAiSkuGovernance
   }
 }
 
@@ -400,6 +404,7 @@ output foundryEndpointNames array = [for (fa, i) in foundryAppNames: foundryApps
 output foundryScoringUris array = [for (fa, i) in foundryAppNames: foundryApps[i].outputs.scoringUri]
 // Governance outputs
 output governancePoliciesEnabled bool = enableGovernancePolicies
+output aiSkuGovernanceEnabled bool = enableGovernancePolicies && enableAiSkuGovernance
 output budgetEnabled bool = monthlyBudgetAmount > 0
 // A2A Connection outputs
 output a2aConnectionNames array = a2aConnections.outputs.connectionNames

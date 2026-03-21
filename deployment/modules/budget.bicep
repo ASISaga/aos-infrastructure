@@ -1,5 +1,9 @@
-// budget.bicep — Azure Cost Management budget for AOS governance
-// Creates a monthly budget with percentage-threshold alert notifications.
+// budget.bicep — Azure Cost Management budget using Azure Verified Modules (AVM)
+//
+// Wraps the AVM consumption/budget module to:
+//   - Derive sensible default start/end dates via utcNow() when none are provided.
+//   - Forward alert-threshold notifications in the compact array form supported by AVM.
+//   - Expose only the parameters callers need (amount, emails, optional date overrides).
 
 @description('Deployment environment (dev, staging, prod)')
 param environment string
@@ -32,36 +36,23 @@ var resolvedEndDate   = empty(endDate)   ? '${currentYear}-12-31' : endDate
 // ── Budget name ──────────────────────────────────────────────────────────────
 var budgetName = 'aos-budget-${environment}'
 
-// ── Threshold notifications ──────────────────────────────────────────────────
-// Build notification object from the alertThresholds and contactEmails arrays.
-// Each threshold gets a unique notification key.
-var notifications = reduce(alertThresholds, {}, (acc, threshold) => union(acc, {
-  'threshold-${threshold}': {
-    enabled: true
-    operator: 'GreaterThanOrEqualTo'
-    threshold: threshold
-    contactEmails: contactEmails
-    contactRoles: ['Owner', 'Contributor']
-    thresholdType: 'Actual'
-  }
-}))
-
-// ── Budget resource ──────────────────────────────────────────────────────────
-resource budget 'Microsoft.Consumption/budgets@2021-10-01' = {
+// ── AVM: Cost Management budget ─────────────────────────────────────────────
+// Uses the AVM consumption/budget module (non-deprecated schema).
+// Scale-to-zero is implicit: the budget tracks actual spend against serverless
+// (GlobalStandard / Standard) resources that cost nothing when idle.
+module budget 'br/public:avm/res/consumption/budget:0.1.1' = {
   name: budgetName
-  properties: {
-    category: 'Cost'
+  params: {
+    name: budgetName
     amount: budgetAmount
-    timeGrain: 'Monthly'
-    timePeriod: {
-      startDate: resolvedStartDate
-      endDate: resolvedEndDate
-    }
-    notifications: notifications
+    startDate: resolvedStartDate
+    endDate: resolvedEndDate
+    contactEmails: contactEmails
+    thresholds: alertThresholds
   }
 }
 
 // ── Outputs ──────────────────────────────────────────────────────────────────
-output budgetId string = budget.id
-output budgetName string = budget.name
+output budgetId string = budget.outputs.resourceId
+output budgetName string = budget.outputs.name
 output budgetAmount int = budgetAmount

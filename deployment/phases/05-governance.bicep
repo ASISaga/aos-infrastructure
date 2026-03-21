@@ -1,11 +1,20 @@
-// Phase 5 — Governance
+// Phase 5 — Governance (Frugal-First, Sovereign Architecture)
 //
-// Deploys the governance layer:
+// Deploys the governance layer using Azure Verified Modules (AVM):
 //   - Azure Policy assignments (allowed locations, HTTPS storage, KV soft-delete)
+//     via AVM authorization/policy-assignment — non-deprecated schema, per-env enforcement
+//   - AI SKU governance policy (GlobalStandard / serverless only, no PTU/Provisioned)
+//     — custom policy definition at subscription scope + AVM assignment
 //   - Cost Management budget with email alerts
+//     via AVM consumption/budget — non-deprecated schema
 //
-// Both resources are conditional — governed by enableGovernancePolicies and
-// monthlyBudgetAmount parameters respectively.
+// Frugal-First principles enforced:
+//   • All AI model deployments must use GlobalStandard (serverless, scale-to-zero) SKU.
+//   • If GlobalStandard is unavailable, fallback to the lowest-capacity Standard (Regional) SKU.
+//   • Provisioned (PTU / GlobalProvisionedManaged) SKUs are explicitly denied.
+//
+// Both the policy module and the budget module are conditional — governed by
+// enableGovernancePolicies and monthlyBudgetAmount parameters respectively.
 //
 // No dependencies on other phases — can be deployed independently.
 
@@ -31,6 +40,9 @@ param governanceAllowedLocations array = [
   'northeurope'
 ]
 
+@description('When true, deploy and assign the custom AI SKU deny policy. Enforces GlobalStandard (serverless, scale-to-zero) and Standard (regional) SKUs. Denies Provisioned / PTU SKUs for all Azure AI model deployments in the resource group.')
+param enableAiSkuGovernance bool = true
+
 @description('Monthly budget limit in the subscription currency (0 = disabled)')
 param monthlyBudgetAmount int = 0
 
@@ -46,6 +58,7 @@ module governancePolicy '../modules/policy.bicep' = if (enableGovernancePolicies
   params: {
     environment: environment
     allowedLocations: governanceAllowedLocations
+    enableAiSkuGovernance: enableAiSkuGovernance
   }
 }
 
@@ -57,3 +70,9 @@ module governanceBudget '../modules/budget.bicep' = if (monthlyBudgetAmount > 0)
     contactEmails: budgetAlertEmails
   }
 }
+
+// ====================================================================
+// Outputs
+// ====================================================================
+
+output aiSkuGovernanceEnabled bool = enableGovernancePolicies && enableAiSkuGovernance
