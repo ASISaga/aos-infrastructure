@@ -467,8 +467,9 @@ class InfrastructureManager:
         skipped when the SDK is unavailable).  Returns ``False`` when one or
         more apps fail.
 
-        Caller is responsible for running :meth:`deploy_bicep` first so that
-        the target Function Apps exist in Azure before code deployment begins.
+        Caller is responsible for running :meth:`deploy_bicep_foundation` and
+        :meth:`deploy_bicep_function_apps` (or :meth:`deploy_bicep`) first so
+        that the target Function Apps exist in Azure before code deployment begins.
         """
         bridge = SDKBridge(
             resource_group=self.config.resource_group,
@@ -507,6 +508,48 @@ class InfrastructureManager:
             return False
         print(f"  ✅ Kernel config synced ({len(env_vars)} vars)")
         return True
+
+    # ------------------------------------------------------------------
+    # Granular Bicep phase deployment entrypoints
+    # ------------------------------------------------------------------
+
+    def deploy_bicep_foundation(self) -> bool:
+        """Deploy Phase 1 — Foundation (monitoring, storage, serviceBus, keyVault).
+
+        Deploys the core platform resources that every other Bicep phase depends on.
+        Safe to run first and independently.
+        """
+        return self._deploy_phase("deployment/phases/01-foundation.bicep", "foundation")
+
+    def deploy_bicep_ai_services(self) -> bool:
+        """Deploy Phase 2 — AI Services (aiServices, aiHub, aiProject, modelRegistry).
+
+        Requires Phase 1 (foundation) to be deployed first.
+        """
+        return self._deploy_phase("deployment/phases/02-ai-services.bicep", "ai-services")
+
+    def deploy_bicep_ai_apps(self) -> bool:
+        """Deploy Phase 3 — AI Applications (loraInference, foundryApps, aiGateway, a2aConnections).
+
+        Requires Phase 2 (ai-services) to be deployed first.
+        """
+        return self._deploy_phase("deployment/phases/03-ai-applications.bicep", "ai-apps")
+
+    def deploy_bicep_function_apps(self) -> bool:
+        """Deploy Phase 4 — Function Apps (functionApps, mcpServerFunctionApps).
+
+        Requires Phase 1 (foundation) to be deployed first.
+        """
+        return self._deploy_phase("deployment/phases/04-function-apps.bicep", "function-apps")
+
+    def deploy_bicep_governance(self) -> bool:
+        """Deploy Phase 5 — Governance (policy assignments, cost budget).
+
+        Both resources are conditional and may result in no-op deployments when
+        ``enableGovernancePolicies=false`` and ``monthlyBudgetAmount=0``.
+        Independent of other phases — safe to run at any time.
+        """
+        return self._deploy_phase("deployment/phases/05-governance.bicep", "governance")
 
     # ------------------------------------------------------------------
     # Private helpers — three-pillar lifecycle
@@ -852,6 +895,130 @@ class InfrastructureManager:
     # ------------------------------------------------------------------
 
     _SHA_RE = re.compile(r"^[a-fA-F0-9]{7,40}$")
+
+    def _deploy_phase(self, phase_template: str, phase_name: str) -> bool:
+        """Deploy a phase-specific Bicep template as a named ARM incremental deployment.
+
+        Each phase runs ``az deployment group create`` against the given template
+        with the same inline parameter overrides used by the full deploy (environment,
+        location, locationML, git-sha tags).  Bicep ``.bicepparam`` parameter files
+        are **not** used for phase deployments — phases use template defaults for
+        all parameters not overridden inline.
+
+        After the ARM deployment completes (success **or** failure), the method
+        queries ``az deployment group operation list`` to display a per-module
+        provisioning status table — the "proper azure-provisioning status reporting"
+        required by the phase-based workflow.
+
+        Parameters
+        ----------
+        phase_template:
+            Relative path to the Bicep phase template (e.g.
+            ``"deployment/phases/01-foundation.bicep"``).
+        phase_name:
+            Short slug used in the ARM deployment name (e.g. ``"foundation"``).
+            The full deployment name will be ``phase-<phase_name>-<environment>``.
+
+        Returns
+        -------
+        bool
+            ``True`` when the ARM deployment exits zero; ``False`` otherwise.
+        """
+        deployment_name = f"phase-{phase_name}-{self.config.environment}"
+        cmd = [
+            "az", "deployment", "group", "create",
+            "--resource-group", self.config.resource_group,
+            "--template-file", phase_template,
+            "--name", deployment_name,
+            "--output", "none",
+        ]
+        # Inline parameter overrides — same set as _deployment_cmd()
+        overrides: list[str] = [
+            f"environment={self.config.environment}",
+            f"location={self.config.location}",
+        ]
+        if self.config.location_ml:
+            overrides.append(f"locationML={self.config.location_ml}")
+        if self.config.git_sha and self._SHA_RE.match(self.config.git_sha):
+            overrides.append(f'tags={{"gitSha":"{self.config.git_sha}"}}')
+        cmd += ["--parameters"] + overrides
+
+        print(
+            f"\n  🏗️  Phase '{phase_name}': deploying '{phase_template}' "
+            f"→ '{self.config.resource_group}' …"
+        )
+        result = self._run(cmd, stream=True)
+        succeeded = result.returncode == 0
+        if not succeeded:
+            print(
+                f"  ❌ Phase '{phase_name}' failed (exit code {result.returncode})",
+                file=sys.stderr,
+            )
+        else:
+            print(f"  ✅ Phase '{phase_name}' ARM deployment completed")
+
+        # Always query and display per-module provisioning status for diagnostics.
+        self._query_phase_deployment_status(deployment_name)
+        return succeeded
+
+    def _query_phase_deployment_status(self, deployment_name: str) -> bool:
+        """Query ARM deployment operations and print a per-module provisioning status table.
+
+        After each phase deployment (success or failure), this method calls
+        ``az deployment group operation list`` to surface each Bicep module's
+        provisioning state from Azure.  This is the "proper azure-provisioning status
+        reporting" — each module (e.g. ``monitoring-aos-staging``) gets an
+        individual ✅/❌/⏳ status line.
+
+        Parameters
+        ----------
+        deployment_name:
+            The ARM deployment name to query (e.g. ``"phase-foundation-staging"``).
+
+        Returns
+        -------
+        bool
+            ``True`` when all reported operations are in ``"Succeeded"`` state.
+        """
+        result = self._az([
+            "deployment", "group", "operation", "list",
+            "--resource-group", self.config.resource_group,
+            "--name", deployment_name,
+            "--query", (
+                "[?properties.targetResource != null]"
+                ".{name:properties.targetResource.resourceName,"
+                "type:properties.targetResource.resourceType,"
+                "state:properties.provisioningState}"
+            ),
+            "--output", "json",
+        ])
+        if result is None:
+            # The deployment may not exist yet (e.g. during a dry-run / test).
+            return True
+        try:
+            ops = json.loads(result)
+        except json.JSONDecodeError:
+            return True
+        if not ops:
+            return True
+
+        print(f"\n  📊 Azure Provisioning Status — {deployment_name}")
+        print(f"  {'Module':<45} {'Type':<28} {'State'}")
+        print(f"  {'-'*45} {'-'*28} {'-'*12}")
+        all_ok = True
+        for op in sorted(ops, key=lambda x: x.get("name", "")):
+            name = op.get("name") or "—"
+            state = op.get("state") or "Unknown"
+            rtype = (op.get("type") or "").split("/")[-1] or "—"
+            if state == "Succeeded":
+                icon = "✅"
+            elif state == "Failed":
+                icon = "❌"
+                all_ok = False
+            else:
+                icon = "⏳"
+            print(f"  {icon} {name:<44} {rtype:<28} {state}")
+        return all_ok
 
     def _deployment_cmd(self, action: str, *, output_format: str = "json") -> list[str]:
         """Build the ``az deployment group <action>`` command list.

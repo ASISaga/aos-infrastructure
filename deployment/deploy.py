@@ -63,6 +63,12 @@ _STEP_COMMANDS: tuple[str, ...] = (
     "health-check",
     "deploy-function-apps",
     "sync-kernel-config",
+    # Granular Bicep phase commands — split from the monolithic deploy-bicep
+    "deploy-bicep-foundation",
+    "deploy-bicep-ai-services",
+    "deploy-bicep-ai-apps",
+    "deploy-bicep-function-apps",
+    "deploy-bicep-governance",
 )
 
 
@@ -187,6 +193,17 @@ def _build_parser() -> argparse.ArgumentParser:
                           help="Deploy Python Function Apps via the SDK bridge (pipeline step 7)")
     subparsers.add_parser("sync-kernel-config", parents=[step_parent],
                           help="Sync AOS kernel env vars to all Function Apps (pipeline step 8)")
+    # ── Granular Bicep phase commands (split from deploy-bicep) ───────────
+    subparsers.add_parser("deploy-bicep-foundation", parents=[step_parent],
+                          help="Deploy Phase 1 — foundation resources (monitoring/storage/serviceBus/keyVault)")
+    subparsers.add_parser("deploy-bicep-ai-services", parents=[step_parent],
+                          help="Deploy Phase 2 — AI services (aiServices/aiHub/aiProject/modelRegistry)")
+    subparsers.add_parser("deploy-bicep-ai-apps", parents=[step_parent],
+                          help="Deploy Phase 3 — AI applications (loraInference/foundryApps/aiGateway/a2aConnections)")
+    subparsers.add_parser("deploy-bicep-function-apps", parents=[step_parent],
+                          help="Deploy Phase 4 — Function Apps (functionApps/mcpServerFunctionApps)")
+    subparsers.add_parser("deploy-bicep-governance", parents=[step_parent],
+                          help="Deploy Phase 5 — Governance (policy assignments/cost budget)")
 
     # ── Cleanup ────────────────────────────────────────────────────────────
     p_delete = subparsers.add_parser("delete", parents=[parent], help="Delete resource group")
@@ -207,14 +224,19 @@ def main(argv: list[str] | None = None) -> int:
         config = DeploymentConfig.from_args(args)
         mgr = InfrastructureManager(config)
         step_map = {
-            "ensure-rg":            mgr.ensure_rg,
-            "lint":                 mgr.lint,
-            "validate":             mgr.validate,
-            "what-if":              mgr.what_if,
-            "deploy-bicep":         mgr.deploy_bicep,
-            "health-check":         mgr.health_check,
-            "deploy-function-apps": mgr.deploy_function_apps,
-            "sync-kernel-config":   mgr.sync_kernel_config,
+            "ensure-rg":                   mgr.ensure_rg,
+            "lint":                        mgr.lint,
+            "validate":                    mgr.validate,
+            "what-if":                     mgr.what_if,
+            "deploy-bicep":                mgr.deploy_bicep,
+            "health-check":                mgr.health_check,
+            "deploy-function-apps":        mgr.deploy_function_apps,
+            "sync-kernel-config":          mgr.sync_kernel_config,
+            "deploy-bicep-foundation":     mgr.deploy_bicep_foundation,
+            "deploy-bicep-ai-services":    mgr.deploy_bicep_ai_services,
+            "deploy-bicep-ai-apps":        mgr.deploy_bicep_ai_apps,
+            "deploy-bicep-function-apps":  mgr.deploy_bicep_function_apps,
+            "deploy-bicep-governance":     mgr.deploy_bicep_governance,
         }
         return 0 if step_map[args.command]() else 1
 
