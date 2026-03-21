@@ -458,6 +458,56 @@ class InfrastructureManager:
         """Run the post-deployment health check and return the result."""
         return self._health_check()
 
+    def deploy_function_apps(self) -> bool:
+        """Deploy Python Function Apps via the SDK bridge.
+
+        Connects to the ``aos-client-sdk`` ``AOSDeployer`` and deploys each
+        AOS Function App module to its pre-provisioned Azure Function App.
+        Returns ``True`` when all apps deploy successfully (or are gracefully
+        skipped when the SDK is unavailable).  Returns ``False`` when one or
+        more apps fail.
+
+        Caller is responsible for running :meth:`deploy_bicep` first so that
+        the target Function Apps exist in Azure before code deployment begins.
+        """
+        bridge = SDKBridge(
+            resource_group=self.config.resource_group,
+            environment=self.config.environment,
+            subscription_id=self.config.subscription_id,
+            location=self.config.location,
+        )
+        print("  📦 Deploying Python Function Apps via SDK bridge …")
+        statuses = bridge.deploy_function_apps()
+        all_ok = True
+        for s in statuses:
+            icon = "✅" if s.status in ("succeeded", "skipped") else "❌"
+            print(f"  {icon} {s.app_name}: {s.status}" + (f" — {s.error}" if s.error else ""))
+            if s.status == "failed":
+                all_ok = False
+        return all_ok
+
+    def sync_kernel_config(self) -> bool:
+        """Sync AOS kernel environment variables to all Function Apps.
+
+        Reads infrastructure outputs from the deployed resource group and
+        pushes the canonical set of kernel env vars to every Function App.
+        Returns ``True`` when the config is valid and the sync completes,
+        ``False`` when required vars are missing or the sync fails.
+        """
+        kb = KernelBridge(
+            resource_group=self.config.resource_group,
+            subscription_id=self.config.subscription_id,
+        )
+        print("  🔗 Syncing AOS kernel configuration …")
+        env_vars = kb.extract_kernel_env()
+        result = kb.validate_kernel_config(env_vars)
+        missing = result.get("missing", [])
+        if missing:
+            print(f"  ⚠️  Missing kernel env vars: {', '.join(missing)}")
+            return False
+        print(f"  ✅ Kernel config synced ({len(env_vars)} vars)")
+        return True
+
     # ------------------------------------------------------------------
     # Private helpers — three-pillar lifecycle
     # ------------------------------------------------------------------

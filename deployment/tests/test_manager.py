@@ -461,6 +461,70 @@ class TestInfrastructureManagerSteps:
         ])
         assert manager.health_check() is False
 
+    # ── deploy_function_apps ───────────────────────────────────────────
+
+    @mock.patch("orchestrator.integration.sdk_bridge.SDKBridge.deploy_function_apps")
+    def test_deploy_function_apps_returns_true_on_all_succeeded(
+        self, mock_deploy: mock.Mock, manager: InfrastructureManager
+    ) -> None:
+        from orchestrator.integration.sdk_bridge import AppDeploymentStatus
+        mock_deploy.return_value = [
+            AppDeploymentStatus(app_name="agent-operating-system", status="succeeded"),
+            AppDeploymentStatus(app_name="mcp-erpnext", status="succeeded"),
+        ]
+        assert manager.deploy_function_apps() is True
+
+    @mock.patch("orchestrator.integration.sdk_bridge.SDKBridge.deploy_function_apps")
+    def test_deploy_function_apps_returns_false_when_app_fails(
+        self, mock_deploy: mock.Mock, manager: InfrastructureManager
+    ) -> None:
+        from orchestrator.integration.sdk_bridge import AppDeploymentStatus
+        mock_deploy.return_value = [
+            AppDeploymentStatus(app_name="agent-operating-system", status="succeeded"),
+            AppDeploymentStatus(app_name="mcp-erpnext", status="failed", error="deploy error"),
+        ]
+        assert manager.deploy_function_apps() is False
+
+    @mock.patch("orchestrator.integration.sdk_bridge.SDKBridge.deploy_function_apps")
+    def test_deploy_function_apps_returns_true_when_skipped(
+        self, mock_deploy: mock.Mock, manager: InfrastructureManager
+    ) -> None:
+        from orchestrator.integration.sdk_bridge import AppDeploymentStatus
+        mock_deploy.return_value = [
+            AppDeploymentStatus(
+                app_name="agent-operating-system",
+                status="skipped",
+                error="aos-client-sdk not available",
+            ),
+        ]
+        assert manager.deploy_function_apps() is True
+
+    # ── sync_kernel_config ─────────────────────────────────────────────
+
+    @mock.patch("orchestrator.integration.kernel_bridge.KernelBridge.validate_kernel_config")
+    @mock.patch("orchestrator.integration.kernel_bridge.KernelBridge.extract_kernel_env")
+    def test_sync_kernel_config_returns_true_when_valid(
+        self,
+        mock_extract: mock.Mock,
+        mock_validate: mock.Mock,
+        manager: InfrastructureManager,
+    ) -> None:
+        mock_extract.return_value = {"SERVICE_BUS_CONNECTION": "sb://...", "KEY_VAULT_URL": "https://..."}
+        mock_validate.return_value = {"present": ["SERVICE_BUS_CONNECTION", "KEY_VAULT_URL"], "missing": []}
+        assert manager.sync_kernel_config() is True
+
+    @mock.patch("orchestrator.integration.kernel_bridge.KernelBridge.validate_kernel_config")
+    @mock.patch("orchestrator.integration.kernel_bridge.KernelBridge.extract_kernel_env")
+    def test_sync_kernel_config_returns_false_when_missing_vars(
+        self,
+        mock_extract: mock.Mock,
+        mock_validate: mock.Mock,
+        manager: InfrastructureManager,
+    ) -> None:
+        mock_extract.return_value = {}
+        mock_validate.return_value = {"present": [], "missing": ["SERVICE_BUS_CONNECTION"]}
+        assert manager.sync_kernel_config() is False
+
 
 # ====================================================================
 # deploy.py CLI — step subcommand tests
@@ -525,3 +589,21 @@ class TestDeployPyStepCommands:
     @mock.patch("orchestrator.core.manager.InfrastructureManager.deploy_bicep", return_value=False)
     def test_deploy_bicep_subcommand_exits_one_on_failure(self, mock_fn: mock.Mock) -> None:
         assert self._run(["deploy-bicep"] + self.BASE_ARGS) == 1
+
+    @mock.patch("orchestrator.core.manager.InfrastructureManager.deploy_function_apps", return_value=True)
+    def test_deploy_function_apps_subcommand_exits_zero(self, mock_fn: mock.Mock) -> None:
+        assert self._run(["deploy-function-apps"] + self.BASE_ARGS) == 0
+        mock_fn.assert_called_once()
+
+    @mock.patch("orchestrator.core.manager.InfrastructureManager.deploy_function_apps", return_value=False)
+    def test_deploy_function_apps_subcommand_exits_one_on_failure(self, mock_fn: mock.Mock) -> None:
+        assert self._run(["deploy-function-apps"] + self.BASE_ARGS) == 1
+
+    @mock.patch("orchestrator.core.manager.InfrastructureManager.sync_kernel_config", return_value=True)
+    def test_sync_kernel_config_subcommand_exits_zero(self, mock_fn: mock.Mock) -> None:
+        assert self._run(["sync-kernel-config"] + self.BASE_ARGS) == 0
+        mock_fn.assert_called_once()
+
+    @mock.patch("orchestrator.core.manager.InfrastructureManager.sync_kernel_config", return_value=False)
+    def test_sync_kernel_config_subcommand_exits_one_on_failure(self, mock_fn: mock.Mock) -> None:
+        assert self._run(["sync-kernel-config"] + self.BASE_ARGS) == 1

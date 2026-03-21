@@ -52,6 +52,19 @@ from orchestrator.core.config import (
 from orchestrator.core.manager import InfrastructureManager
 from orchestrator.automation.lifecycle import LifecycleManager
 
+# Individual pipeline step subcommands — each maps to a single InfrastructureManager method.
+# See _build_parser() and main() for usage.
+_STEP_COMMANDS: tuple[str, ...] = (
+    "ensure-rg",
+    "lint",
+    "validate",
+    "what-if",
+    "deploy-bicep",
+    "health-check",
+    "deploy-function-apps",
+    "sync-kernel-config",
+)
+
 
 def _build_parser() -> argparse.ArgumentParser:
     """Build the argument parser with all subcommands."""
@@ -170,6 +183,10 @@ def _build_parser() -> argparse.ArgumentParser:
                           help="Deploy the Bicep infrastructure (pipeline step 5)")
     subparsers.add_parser("health-check", parents=[step_parent],
                           help="Post-deploy health check (pipeline step 6)")
+    subparsers.add_parser("deploy-function-apps", parents=[step_parent],
+                          help="Deploy Python Function Apps via the SDK bridge (pipeline step 7)")
+    subparsers.add_parser("sync-kernel-config", parents=[step_parent],
+                          help="Sync AOS kernel env vars to all Function Apps (pipeline step 8)")
 
     # ── Cleanup ────────────────────────────────────────────────────────────
     p_delete = subparsers.add_parser("delete", parents=[parent], help="Delete resource group")
@@ -186,16 +203,18 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     # ── Individual pipeline step commands ─────────────────────────────
-    if args.command in ("ensure-rg", "lint", "validate", "what-if", "deploy-bicep", "health-check"):
+    if args.command in _STEP_COMMANDS:
         config = DeploymentConfig.from_args(args)
         mgr = InfrastructureManager(config)
         step_map = {
-            "ensure-rg":    mgr.ensure_rg,
-            "lint":         mgr.lint,
-            "validate":     mgr.validate,
-            "what-if":      mgr.what_if,
-            "deploy-bicep": mgr.deploy_bicep,
-            "health-check": mgr.health_check,
+            "ensure-rg":            mgr.ensure_rg,
+            "lint":                 mgr.lint,
+            "validate":             mgr.validate,
+            "what-if":              mgr.what_if,
+            "deploy-bicep":         mgr.deploy_bicep,
+            "health-check":         mgr.health_check,
+            "deploy-function-apps": mgr.deploy_function_apps,
+            "sync-kernel-config":   mgr.sync_kernel_config,
         }
         return 0 if step_map[args.command]() else 1
 
