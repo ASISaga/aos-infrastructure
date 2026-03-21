@@ -32,7 +32,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Optional
 
-from .azure_sdk_client import (
+from orchestrator.integration.azure_sdk_client import (
     AzureSDKClient,
     CostSummary,
     InfrastructureSnapshot,
