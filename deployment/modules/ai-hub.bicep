@@ -34,9 +34,6 @@ param aiServicesAccountId string
 @description('AI Services account name for the hub connection')
 param aiServicesAccountName string
 
-@description('VM size for the fine-tuning compute cluster. Choose a GPU VM with available quota; defaults to Standard_NC6s_v3 (V100, 16 GB VRAM) which suits QLoRA fine-tuning of 7B–13B models and is widely available. Latency-tolerant workloads can use spot pricing on any instance size.')
-param fineTuningVmSize string = 'Standard_NC6s_v3'
-
 // ====================================================================
 // Variables
 // ====================================================================
@@ -81,32 +78,6 @@ resource aiServicesConnection 'Microsoft.MachineLearningServices/workspaces/conn
   }
 }
 
-// Fine-tuning compute cluster — spot/low-priority VMs for lowest cost LoRA adapter training.
-// Latency-tolerant: Azure may evict nodes at any time (LowPriority), reducing cost by ~60-80%.
-// Min node count of 0 means no cost when idle; scales up only when a training job is submitted.
-resource fineTuningCompute 'Microsoft.MachineLearningServices/workspaces/computes@2024-10-01' = {
-  parent: aiHub
-  name: 'ft-cluster-${environment}'
-  location: location
-  tags: tags
-  properties: {
-    computeType: 'AmlCompute'
-    computeLocation: location
-    description: 'Fine-tuning compute cluster — spot pricing (LowPriority) for lowest-cost LoRA adapter training'
-    properties: {
-      vmSize: fineTuningVmSize
-      vmPriority: 'LowPriority'
-      scaleSettings: {
-        minNodeCount: 0
-        maxNodeCount: 4
-        nodeIdleTimeBeforeScaleDown: 'PT120S'
-      }
-      enableNodePublicIp: false
-      remoteLoginPortPublicAccess: 'Disabled'
-    }
-  }
-}
-
 // ====================================================================
 // Outputs
 // ====================================================================
@@ -114,4 +85,3 @@ resource fineTuningCompute 'Microsoft.MachineLearningServices/workspaces/compute
 output hubName string = aiHub.name
 output hubId string = aiHub.id
 output hubPrincipalId string = aiHub.identity.principalId
-output fineTuningComputeName string = fineTuningCompute.name
