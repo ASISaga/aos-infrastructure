@@ -186,7 +186,7 @@ class InfrastructureManager:
             from orchestrator.integration.azure_sdk_client import AzureSDKClient
         except ImportError:
             logger.warning(
-                "OODA loop requires azure SDK packages; falling back to pipeline deploy"
+                "OODA loop requires Azure SDK packages; falling back to pipeline deploy"
             )
             return self.deploy()
 

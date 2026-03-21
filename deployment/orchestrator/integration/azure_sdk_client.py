@@ -52,10 +52,13 @@ class ProvisioningState(str, Enum):
     @classmethod
     def from_str(cls, value: str) -> "ProvisioningState":
         """Parse a provisioning state string (case-insensitive)."""
-        for member in cls:
-            if member.value.lower() == (value or "").lower():
-                return member
-        return cls.UNKNOWN
+        return cls._LOOKUP.get((value or "").lower(), cls.UNKNOWN)
+
+
+# Build the lookup once at class definition time.
+ProvisioningState._LOOKUP = {  # type: ignore[attr-defined]
+    m.value.lower(): m for m in ProvisioningState
+}
 
 
 @dataclass

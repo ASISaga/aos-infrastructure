@@ -318,31 +318,8 @@ class OODALoop:
         snapshot = observation.snapshot
         desired = self.desired_state
 
-        # Health assessment
-        if snapshot.total_resources == 0:
-            health = HealthAssessment.UNKNOWN
-        elif snapshot.healthy_resources == snapshot.total_resources:
-            health = HealthAssessment.HEALTHY
-        elif snapshot.healthy_resources > 0:
-            health = HealthAssessment.DEGRADED
-        else:
-            health = HealthAssessment.UNHEALTHY
-
-        # Drift detection — compare expected vs observed resource names
-        observed_names = {r.name.lower() for r in snapshot.resources}
-        expected_names = {
-            r["name"].lower() for r in desired.expected_resources if "name" in r
-        }
-
-        missing = [
-            name for name in sorted(expected_names - observed_names)
-        ]
-        unexpected = [
-            name for name in sorted(observed_names - expected_names)
-        ] if expected_names else []
-        unhealthy = [
-            r.name for r in snapshot.unhealthy_resources
-        ]
+        health = self._assess_health(snapshot)
+        missing, unexpected, unhealthy = self._detect_drift(snapshot, desired)
 
         drift = bool(missing or unexpected or unhealthy)
         state_matches = (
@@ -504,6 +481,40 @@ class OODALoop:
     def approve_action(self, cycle: OODACycle) -> None:
         """Manually approve a pending action decision."""
         cycle.decision.approved = True
+
+    # ------------------------------------------------------------------
+    # Private helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _assess_health(snapshot: InfrastructureSnapshot) -> HealthAssessment:
+        """Derive an aggregate health assessment from a snapshot."""
+        if snapshot.total_resources == 0:
+            return HealthAssessment.UNKNOWN
+        if snapshot.healthy_resources == snapshot.total_resources:
+            return HealthAssessment.HEALTHY
+        if snapshot.healthy_resources > 0:
+            return HealthAssessment.DEGRADED
+        return HealthAssessment.UNHEALTHY
+
+    @staticmethod
+    def _detect_drift(
+        snapshot: InfrastructureSnapshot,
+        desired: DesiredState,
+    ) -> tuple[list[str], list[str], list[str]]:
+        """Compare expected vs observed resource names.
+
+        Returns ``(missing, unexpected, unhealthy)`` name lists.
+        """
+        observed_names = {r.name.lower() for r in snapshot.resources}
+        expected_names = {
+            r["name"].lower() for r in desired.expected_resources if "name" in r
+        }
+
+        missing = sorted(expected_names - observed_names)
+        unexpected = sorted(observed_names - expected_names) if expected_names else []
+        unhealthy = [r.name for r in snapshot.unhealthy_resources]
+        return missing, unexpected, unhealthy
 
     # ------------------------------------------------------------------
     # Reporting
