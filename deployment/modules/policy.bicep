@@ -1,5 +1,16 @@
-// policy.bicep — Azure Policy assignments for AOS governance
+// policy.bicep — AOS governance policy assignments using Azure Verified Modules (AVM)
+//
 // Assigns the standard AOS governance policy initiative to the deployment scope.
+//
+// All assignments use the AVM authorization/policy-assignment module, which:
+//   - Uses a current, non-deprecated API version
+//   - Follows the AVM interface contract (name, policyDefinitionId, enforcementMode, …)
+//
+// AI SKU governance (enableAiSkuGovernance=true) additionally:
+//   1. Creates a custom policy definition at subscription scope (ai-sku-policy-def.bicep)
+//      that denies Provisioned / PTU AI model deployment SKUs.
+//   2. Assigns that definition via AVM so only GlobalStandard (serverless, scale-to-zero)
+//      or Standard (regional) SKUs can be deployed — never Provisioned/PTU.
 
 @description('Deployment environment (dev, staging, prod)')
 param environment string
@@ -13,47 +24,80 @@ param allowedLocations array = [
   'northeurope'
 ]
 
-// ── Built-in policy definition IDs ──────────────────────────────────────────
-var policyAllowedLocations = 'e56962a6-4747-49cd-b67b-bf8b01975c4c'
-var policyRequireHttpsStorage = '404c3081-a854-4457-ae30-26a93ef643f9'
-var policyKeyVaultSoftDelete = '1e66c121-a66a-4b1f-9b83-0fd99bf0fc2d'
+@description('When true, deploy the custom "Deny Provisioned AI SKUs" policy definition (at subscription scope) and assign it. Enforces GlobalStandard / Standard-only AI model deployments — no PTU / Provisioned SKUs.')
+param enableAiSkuGovernance bool = true
 
-// ── Allowed Locations policy assignment ─────────────────────────────────────
-resource allowedLocationsAssignment 'Microsoft.Authorization/policyAssignments@2022-06-01' = {
+// ── Built-in policy definition resource IDs ───────────────────────────────────
+var policyAllowedLocations    = tenantResourceId('Microsoft.Authorization/policyDefinitions', 'e56962a6-4747-49cd-b67b-bf8b01975c4c')
+var policyRequireHttpsStorage = tenantResourceId('Microsoft.Authorization/policyDefinitions', '404c3081-a854-4457-ae30-26a93ef643f9')
+var policyKeyVaultSoftDelete  = tenantResourceId('Microsoft.Authorization/policyDefinitions', '1e66c121-a66a-4b1f-9b83-0fd99bf0fc2d')
+
+// ── Enforcement mode per environment ──────────────────────────────────────────
+// prod → hard enforcement; dev/staging → audit-only (DoNotEnforce)
+var enforceMode = environment == 'prod' ? 'Default' : 'DoNotEnforce'
+
+// ── AI SKU custom policy definition (subscription scope) ─────────────────────
+// Deployed at subscription scope so it is visible to all resource groups in the sub.
+// The definition is always created (lightweight, idempotent) so its ID is available
+// to the conditional assignment below without ambiguous output access.
+module aiSkuPolicyDef 'ai-sku-policy-def.bicep' = {
+  name: 'ai-sku-policy-def'
+  scope: subscription()
+}
+
+// ── AVM: Allowed Locations ────────────────────────────────────────────────────
+module allowedLocationsAssignment 'br/public:avm/res/authorization/policy-assignment:0.4.3' = {
   name: 'aos-allowed-locations-${environment}'
-  properties: {
+  params: {
+    name: 'aos-allowed-locations-${environment}'
     displayName: '[AOS] Allowed locations — ${environment}'
-    policyDefinitionId: tenantResourceId('Microsoft.Authorization/policyDefinitions', policyAllowedLocations)
+    policyDefinitionId: policyAllowedLocations
     parameters: {
       listOfAllowedLocations: {
         value: allowedLocations
       }
     }
-    enforcementMode: environment == 'prod' ? 'Default' : 'DoNotEnforce'
+    enforcementMode: enforceMode
   }
 }
 
-// ── Require HTTPS on Storage policy assignment ───────────────────────────────
-resource httpsStorageAssignment 'Microsoft.Authorization/policyAssignments@2022-06-01' = {
+// ── AVM: Require HTTPS on Storage ─────────────────────────────────────────────
+module httpsStorageAssignment 'br/public:avm/res/authorization/policy-assignment:0.4.3' = {
   name: 'aos-https-storage-${environment}'
-  properties: {
+  params: {
+    name: 'aos-https-storage-${environment}'
     displayName: '[AOS] Require HTTPS on Storage — ${environment}'
-    policyDefinitionId: tenantResourceId('Microsoft.Authorization/policyDefinitions', policyRequireHttpsStorage)
-    enforcementMode: environment == 'prod' ? 'Default' : 'DoNotEnforce'
+    policyDefinitionId: policyRequireHttpsStorage
+    enforcementMode: enforceMode
   }
 }
 
-// ── Key Vault soft-delete policy assignment ──────────────────────────────────
-resource kvSoftDeleteAssignment 'Microsoft.Authorization/policyAssignments@2022-06-01' = {
+// ── AVM: Key Vault soft-delete ────────────────────────────────────────────────
+module kvSoftDeleteAssignment 'br/public:avm/res/authorization/policy-assignment:0.4.3' = {
   name: 'aos-kv-softdelete-${environment}'
-  properties: {
+  params: {
+    name: 'aos-kv-softdelete-${environment}'
     displayName: '[AOS] Key Vault soft-delete — ${environment}'
-    policyDefinitionId: tenantResourceId('Microsoft.Authorization/policyDefinitions', policyKeyVaultSoftDelete)
+    policyDefinitionId: policyKeyVaultSoftDelete
+    // Always enforced regardless of environment — KV soft-delete is a data-protection baseline.
     enforcementMode: 'Default'
   }
 }
 
-// ── Outputs ──────────────────────────────────────────────────────────────────
-output allowedLocationsAssignmentId string = allowedLocationsAssignment.id
-output httpsStorageAssignmentId string = httpsStorageAssignment.id
-output kvSoftDeleteAssignmentId string = kvSoftDeleteAssignment.id
+// ── AVM: Deny Provisioned / PTU AI model deployment SKUs ─────────────────────
+// Enforces Frugal-First governance: GlobalStandard (serverless, scale-to-zero) and
+// Standard (regional) SKUs only. PTU / Provisioned capacity is never allowed.
+module aiSkuDenyAssignment 'br/public:avm/res/authorization/policy-assignment:0.4.3' = if (enableAiSkuGovernance) {
+  name: 'aos-deny-provisioned-ai-sku-${environment}'
+  params: {
+    name: 'aos-deny-provisioned-ai-sku-${environment}'
+    displayName: '[AOS] Deny Provisioned / PTU AI SKUs — ${environment}'
+    policyDefinitionId: aiSkuPolicyDef.outputs.policyDefinitionId
+    enforcementMode: enforceMode
+  }
+}
+
+// ── Outputs ───────────────────────────────────────────────────────────────────
+output allowedLocationsAssignmentId string = allowedLocationsAssignment.outputs.resourceId
+output httpsStorageAssignmentId string = httpsStorageAssignment.outputs.resourceId
+output kvSoftDeleteAssignmentId string = kvSoftDeleteAssignment.outputs.resourceId
