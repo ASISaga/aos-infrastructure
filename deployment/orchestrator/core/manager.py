@@ -562,6 +562,7 @@ class InfrastructureManager:
             "governance",
             include_location=False,
             include_location_ml=False,
+            include_tags=False,
         )
 
     # ------------------------------------------------------------------
@@ -916,6 +917,7 @@ class InfrastructureManager:
         *,
         include_location: bool = True,
         include_location_ml: bool = True,
+        include_tags: bool = True,
     ) -> bool:
         """Deploy a phase-specific Bicep template as a named ARM incremental deployment.
 
@@ -947,6 +949,11 @@ class InfrastructureManager:
             ``config.location_ml`` is non-empty.  Set to ``False`` for phases
             whose Bicep template has no ``locationML`` parameter (e.g. Phase 1 —
             Foundation and Phase 4 — Function Apps).
+        include_tags:
+            When ``True`` (default), automatically appends a ``tags`` override
+            with the git SHA when ``config.git_sha`` is set.  Set to ``False``
+            for phase templates that do not define a ``tags`` parameter (e.g.,
+            Phase 5 — Governance).
 
         Returns
         -------
@@ -967,7 +974,7 @@ class InfrastructureManager:
             overrides.append(f"location={self.config.location}")
         if include_location_ml and self.config.location_ml:
             overrides.append(f"locationML={self.config.location_ml}")
-        if self.config.git_sha and self._SHA_RE.match(self.config.git_sha):
+        if include_tags and self.config.git_sha and self._SHA_RE.match(self.config.git_sha):
             overrides.append(f'tags={{"gitSha":"{self.config.git_sha}"}}')
         cmd += ["--parameters"] + overrides
 

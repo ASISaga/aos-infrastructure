@@ -3,7 +3,7 @@
 // Deploys the Azure AI / ML backend resources:
 //   - Azure AI Services (Cognitive Services — OpenAI, language, vision)
 //   - Azure AI Foundry Hub (ML workspace, Hub kind)
-//   - Azure AI Foundry Project (ML workspace, Project kind) + fine-tuning compute
+//   - Azure AI Foundry Project (ML workspace, Project kind)
 //   - Model Registry (stores LoRA adapter assets for C-suite agents)
 //
 // Prerequisites: Phase 1 (foundation) must be deployed first.
@@ -35,9 +35,6 @@ param tags object = {
   environment: environment
   managedBy: 'bicep'
 }
-
-@description('VM size for the fine-tuning compute cluster attached to the AI Project. Defaults to Standard_NC6s_v3 (V100 GPU).')
-param fineTuningVmSize string = 'Standard_NC6s_v3'
 
 // ====================================================================
 // Variables
@@ -108,7 +105,6 @@ module aiProject '../modules/ai-project.bicep' = {
     uniqueSuffix: uniqueSuffix
     tags: tags
     hubId: aiHub.outputs.hubId
-    fineTuningVmSize: fineTuningVmSize
   }
 }
 
@@ -135,5 +131,4 @@ output aiHubId string = aiHub.outputs.hubId
 output aiProjectName string = aiProject.outputs.projectName
 output aiProjectId string = aiProject.outputs.projectId
 output aiProjectDiscoveryUrl string = aiProject.outputs.projectDiscoveryUrl
-output fineTuningComputeName string = aiProject.outputs.fineTuningComputeName
 output modelRegistryName string = modelRegistry.outputs.registryName

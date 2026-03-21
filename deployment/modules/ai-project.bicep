@@ -22,9 +22,6 @@ param tags object
 @description('AI Foundry Hub resource ID (parent workspace)')
 param hubId string
 
-@description('VM size for the fine-tuning compute cluster. Choose a GPU VM with available quota; defaults to Standard_NC6s_v3 (V100, 16 GB VRAM) which suits QLoRA fine-tuning of 7B–13B models and is widely available. Latency-tolerant workloads can use spot pricing on any instance size.')
-param fineTuningVmSize string = 'Standard_NC6s_v3'
-
 // ====================================================================
 // Variables
 // ====================================================================
@@ -69,33 +66,6 @@ resource cogServicesUserRole 'Microsoft.Authorization/roleAssignments@2022-04-01
   }
 }
 
-// Fine-tuning compute cluster — spot/low-priority VMs for lowest cost LoRA adapter training.
-// Latency-tolerant: Azure may evict nodes at any time (LowPriority), reducing cost by ~60-80%.
-// Min node count of 0 means no cost when idle; scales up only when a training job is submitted.
-// Must be attached to a Project workspace (not Hub); Hub workspaces do not support AmlCompute.
-resource fineTuningCompute 'Microsoft.MachineLearningServices/workspaces/computes@2024-10-01' = {
-  parent: aiProject
-  name: 'ft-cluster-${environment}'
-  location: location
-  tags: tags
-  properties: {
-    computeType: 'AmlCompute'
-    computeLocation: location
-    description: 'Fine-tuning compute cluster — spot pricing (LowPriority) for lowest-cost LoRA adapter training'
-    properties: {
-      vmSize: fineTuningVmSize
-      vmPriority: 'LowPriority'
-      scaleSettings: {
-        minNodeCount: 0
-        maxNodeCount: 4
-        nodeIdleTimeBeforeScaleDown: 'PT120S'
-      }
-      enableNodePublicIp: false
-      remoteLoginPortPublicAccess: 'Disabled'
-    }
-  }
-}
-
 // ====================================================================
 // Outputs
 // ====================================================================
@@ -104,4 +74,3 @@ output projectName string = aiProject.name
 output projectId string = aiProject.id
 output projectPrincipalId string = aiProject.identity.principalId
 output projectDiscoveryUrl string = aiProject.properties.discoveryUrl
-output fineTuningComputeName string = fineTuningCompute.name
