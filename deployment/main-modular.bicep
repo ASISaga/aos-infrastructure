@@ -90,6 +90,9 @@ param agentTemplateParameters object = {}
 @description('Enable nested deployment of the provided `agentTemplate` for each foundry app')
 param useAgentNestedDeployment bool = false
 
+@description('When true, creates online deployments for each foundry agent (requires the LoRA adapter models to be already registered in the model registry). Set to false to provision only the endpoint shells until adapters are trained. Workflow: 1) deploy with false (default) to create infra; 2) run fine-tuning jobs on the ft-cluster compute; 3) re-deploy with true once models are confirmed in the registry.')
+param deployFoundryModels bool = false
+
 @description('List of MCP server modules from the ASISaga/mcp repository and its submodules. Each entry specifies the Azure-safe app name and the actual GitHub repository name (which may contain dots) used for Workload Identity Federation.')
 param mcpServerApps array = [
   { appName: 'mcp-erpnext', githubRepo: 'erpnext.asisaga.com' }
@@ -232,7 +235,6 @@ module loraInference 'modules/lora-inference.bicep' = {
     projectName: projectName
     tags: tags
     workspaceId: aiProject.outputs.projectId
-    appNames: foundryAppNames
   }
 }
 
@@ -252,6 +254,7 @@ module foundryApps 'modules/foundry-app.bicep' = [for (fa, i) in foundryAppNames
     // LoRA adapter model registered in the Model Registry for this agent
     modelId: 'azureml://registries/${modelRegistry.outputs.registryName}/models/${fa}-lora-adapter/versions/1'
     skuCapacity: 1
+    deployModel: deployFoundryModels
     useNestedDeployment: useAgentNestedDeployment
     agentTemplate: agentTemplate
     agentTemplateParameters: agentTemplateParameters
@@ -386,6 +389,7 @@ output aiServicesEndpoint string = aiServices.outputs.endpoint
 output aiHubName string = aiHub.outputs.hubName
 output aiProjectName string = aiProject.outputs.projectName
 output aiProjectDiscoveryUrl string = aiProject.outputs.projectDiscoveryUrl
+output fineTuningComputeName string = aiHub.outputs.fineTuningComputeName
 output aiGatewayName string = aiGateway.outputs.gatewayName
 output aiGatewayUrl string = aiGateway.outputs.gatewayUrl
 // Multi-LoRA inference outputs — single shared endpoint for all C-suite agents

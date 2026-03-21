@@ -42,6 +42,9 @@ param instanceType string = 'Standard_DS3_v2'
 @description('SKU capacity (number of replicas for the managed online deployment; 1 = single replica)')
 param skuCapacity int = 1
 
+@description('When true, creates the online deployment resource (requires the model asset to exist in the registry). Set to false to create only the endpoint shell until the LoRA adapter model has been trained and registered.')
+param deployModel bool = true
+
 // ====================================================================
 // Variables
 // ====================================================================
@@ -75,10 +78,12 @@ resource endpoint 'Microsoft.MachineLearningServices/workspaces/onlineEndpoints@
 }
 
 // ====================================================================
-// Deployment — uses a model reference (Model Registry) for predictable infra
+// Deployment — uses a model reference (Model Registry) for predictable infra.
+// Only deployed when deployModel=true (i.e., the LoRA adapter has been trained
+// and registered in the model registry).
 // ====================================================================
 
-resource agentDeployment 'Microsoft.MachineLearningServices/workspaces/onlineEndpoints/deployments@2024-10-01' = {
+resource agentDeployment 'Microsoft.MachineLearningServices/workspaces/onlineEndpoints/deployments@2024-10-01' = if (deployModel) {
   parent: endpoint
   name: deploymentName
   location: location
@@ -107,7 +112,8 @@ resource agentDeployment 'Microsoft.MachineLearningServices/workspaces/onlineEnd
 // ====================================================================
 
 output endpointName string = endpointName
-output deploymentName string = deploymentName
+@description('The deployment resource name, or empty string when deployModel=false (no deployment created yet).')
+output deploymentName string = deployModel ? deploymentName : ''
 output scoringUri string = endpoint.properties.scoringUri
 output endpointId string = endpoint.id
 
