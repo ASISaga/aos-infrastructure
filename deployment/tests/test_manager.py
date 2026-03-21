@@ -559,6 +559,22 @@ class TestInfrastructureManagerSteps:
 
     @mock.patch.object(InfrastructureManager, "_query_phase_deployment_status", return_value=True)
     @mock.patch.object(InfrastructureManager, "_run")
+    def test_deploy_phase_excludes_tags_when_include_tags_false(
+        self, mock_run: mock.Mock, _mock_status: mock.Mock, manager: InfrastructureManager
+    ) -> None:
+        """Phase templates without a `tags` param (e.g. governance) must not receive it."""
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+        manager._deploy_phase(
+            "deployment/phases/05-governance.bicep", "governance",
+            include_location=False, include_location_ml=False, include_tags=False,
+        )
+        cmd = mock_run.call_args[0][0]
+        params_idx = cmd.index("--parameters")
+        overrides = cmd[params_idx + 1:]
+        assert not any(o.startswith("tags=") for o in overrides)
+
+    @mock.patch.object(InfrastructureManager, "_query_phase_deployment_status", return_value=True)
+    @mock.patch.object(InfrastructureManager, "_run")
     def test_deploy_phase_excludes_location_ml_when_include_location_ml_false(
         self, mock_run: mock.Mock, _mock_status: mock.Mock, manager: InfrastructureManager
     ) -> None:
@@ -628,6 +644,7 @@ class TestInfrastructureManagerSteps:
             "deployment/phases/05-governance.bicep", "governance",
             include_location=False,
             include_location_ml=False,
+            include_tags=False,
         )
 
     @mock.patch.object(InfrastructureManager, "_az")
