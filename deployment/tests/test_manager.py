@@ -597,6 +597,56 @@ class TestInfrastructureManagerSteps:
         mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="err")
         assert manager._deploy_phase("deployment/phases/01-foundation.bicep", "foundation") is False
 
+    @mock.patch.object(InfrastructureManager, "_query_phase_deployment_status", return_value=True)
+    @mock.patch.object(InfrastructureManager, "_run")
+    def test_deploy_phase_rbac_policy_warning_treated_as_success(
+        self, mock_run: mock.Mock, _mock_status: mock.Mock,
+        manager_allow_warnings: InfrastructureManager,
+    ) -> None:
+        """Phase 5 governance policyAssignments/write RBAC errors are non-fatal when allow_warnings=True."""
+        rbac_err = (
+            "ERROR: {\"code\":\"InvalidTemplateDeployment\",\"message\":\"Deployment failed: "
+            "Authorization failed for template resource 'aos-allowed-locations-staging' "
+            "of type 'Microsoft.Authorization/policyAssignments'. The client does not "
+            "have permission to perform action 'Microsoft.Authorization/policyAssignments/write'\"}"
+        )
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr=rbac_err,
+        )
+        result = manager_allow_warnings._deploy_phase(
+            "deployment/phases/05-governance.bicep", "governance",
+            include_location=False, include_location_ml=False, include_tags=False,
+        )
+        assert result is True
+
+    @mock.patch.object(InfrastructureManager, "_query_phase_deployment_status", return_value=True)
+    @mock.patch.object(InfrastructureManager, "_run")
+    def test_deploy_phase_rbac_warning_not_swallowed_without_allow_warnings(
+        self, mock_run: mock.Mock, _mock_status: mock.Mock, manager: InfrastructureManager
+    ) -> None:
+        """RBAC errors are still failures when allow_warnings=False (default)."""
+        rbac_err = "Authorization failed for template resource 'aos-allowed-locations-staging'"
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr=rbac_err,
+        )
+        assert manager._deploy_phase(
+            "deployment/phases/05-governance.bicep", "governance",
+            include_location=False, include_location_ml=False, include_tags=False,
+        ) is False
+
+    @mock.patch.object(InfrastructureManager, "_query_phase_deployment_status", return_value=True)
+    @mock.patch.object(InfrastructureManager, "_run")
+    def test_deploy_phase_prints_resource_group_prominently(
+        self, mock_run: mock.Mock, _mock_status: mock.Mock, manager: InfrastructureManager,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Resource group must appear on its own line in the phase output."""
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+        manager._deploy_phase("deployment/phases/01-foundation.bicep", "foundation")
+        captured = capsys.readouterr()
+        assert "Resource Group" in captured.out
+        assert manager.config.resource_group in captured.out
+
     @mock.patch.object(InfrastructureManager, "_deploy_phase", return_value=True)
     def test_deploy_bicep_foundation_delegates_to_phase(
         self, mock_phase: mock.Mock, manager: InfrastructureManager

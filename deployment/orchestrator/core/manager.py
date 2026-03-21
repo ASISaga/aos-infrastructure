@@ -44,11 +44,13 @@ _AUDIT_DIR = Path(__file__).resolve().parent.parent.parent / "audit"
 
 # Patterns that identify a role-assignment permission warning during what-if.
 # The deployment SP may hold *Contributor* but not *Owner* / *User Access
-# Administrator*, causing Azure CLI to exit non-zero for role-assignment
-# resources.  Role assignments use deterministic GUID names (idempotent) so
-# treating this as a warning and continuing to deploy is safe.
+# Administrator*, causing Azure CLI to exit non-zero for role-assignment or
+# policy-assignment resources.  Both are idempotent by name (role assignments
+# use deterministic GUIDs; policy assignments use deterministic slugs), so
+# treating these as warnings and continuing is safe when allow_warnings=True.
 _RBAC_AUTH_PATTERNS = (
     "Microsoft.Authorization/roleAssignments/write",
+    "Microsoft.Authorization/policyAssignments/write",
     "Authorization failed for template resource",
 )
 
@@ -978,17 +980,38 @@ class InfrastructureManager:
             overrides.append(f'tags={{"gitSha":"{self.config.git_sha}"}}')
         cmd += ["--parameters"] + overrides
 
-        print(
-            f"\n  🏗️  Phase '{phase_name}': deploying '{phase_template}' "
-            f"→ '{self.config.resource_group}' …"
-        )
-        result = self._run(cmd, stream=True)
+        # Display resource group prominently so it is clearly visible in CI output.
+        print(f"\n  📦 Resource Group: {self.config.resource_group}")
+        print(f"  🏗️  Phase '{phase_name}': deploying '{phase_template}' …")
+
+        # Capture output (rather than streaming) so that RBAC authorization
+        # errors in stderr can be inspected when allow_warnings=True.
+        # az deployment group create --output none produces minimal stdout;
+        # the per-module status table below provides the real-time progress.
+        result = self._run(cmd)
+        if result.stdout and result.stdout.strip():
+            print(result.stdout)
+        if result.stderr and result.stderr.strip():
+            print(result.stderr, file=sys.stderr)
+
         succeeded = result.returncode == 0
         if not succeeded:
             print(
                 f"  ❌ Phase '{phase_name}' failed (exit code {result.returncode})",
                 file=sys.stderr,
             )
+            # When allow_warnings=True, treat RBAC authorization failures (role
+            # assignments or policy assignments) as non-fatal warnings.  The SP
+            # may hold Contributor but lack the User Access Administrator /
+            # Policy Contributor role needed to write these resources.
+            if self.config.allow_warnings:
+                error_text = (result.stderr or "") + (result.stdout or "")
+                if _is_rbac_authorization_warning(error_text):
+                    print(
+                        f"  ⚠️  Phase '{phase_name}' — RBAC authorization warning detected; "
+                        f"continuing (allow_warnings=True).",
+                    )
+                    succeeded = True
         else:
             print(f"  ✅ Phase '{phase_name}' ARM deployment completed")
 
