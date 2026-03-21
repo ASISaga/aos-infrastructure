@@ -45,6 +45,16 @@ on:
         required: false
         type: boolean
         default: false
+      deploy_function_apps:
+        description: 'Deploy Python Function Apps via SDK bridge after Bicep (requires aos-client-sdk)'
+        required: false
+        type: boolean
+        default: false
+      sync_kernel_config:
+        description: 'Sync AOS kernel env vars to all Function Apps after deployment'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   id-token: write
@@ -249,9 +259,128 @@ jobs:
           set -e
           exit $EXIT_CODE
 
-      # ── Pipeline step 5 — Deploy (deploy mode only) ───────────────────────
-      - name: Deploy Bicep Infrastructure
-        id: deploy_bicep
+      # ── Pipeline steps 5a–5e: Bicep Infrastructure Phases ────────────────
+      # The monolithic "Deploy Bicep Infrastructure" step is replaced by 5
+      # granular phase steps, each deploying a logical group of Bicep modules.
+      # Each phase uses `az deployment group create` (incremental mode) and
+      # shows a per-module Azure provisioning status table after completion.
+      #
+      # Phase dependency order: Foundation → AI Services → AI Applications
+      #                                     Foundation → Function Apps
+      #                         Governance runs independently (always)
+
+      # ── Phase 1 — Foundation (monitoring / storage / serviceBus / keyVault) ──
+      - name: "Bicep Phase 1 — Foundation"
+        id: deploy_foundation
+        if: >-
+          needs.validate.outputs.is_dry_run != 'true' &&
+          steps.what_if.outcome == 'success'
+        continue-on-error: true
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          set +e
+          python3 deployment/deploy.py deploy-bicep-foundation \
+            --resource-group "${{ needs.validate.outputs.resource_group }}" \
+            --location "${{ steps.region_select.outputs.primary_region }}" \
+            --location-ml "${{ steps.region_select.outputs.ml_region }}" \
+            --environment "${{ needs.validate.outputs.environment }}" \
+            --template "${{ inputs.template || 'deployment/main-modular.bicep' }}" \
+            --allow-warnings \
+            --git-sha "${{ github.sha }}" \
+            2>&1 | tee -a orchestrator-output.log
+          EXIT_CODE=${PIPESTATUS[0]}
+          set -e
+          exit $EXIT_CODE
+
+      # ── Phase 2 — AI Services (aiServices / aiHub / aiProject / modelRegistry) ──
+      - name: "Bicep Phase 2 — AI Services"
+        id: deploy_ai_services
+        if: >-
+          needs.validate.outputs.is_dry_run != 'true' &&
+          steps.deploy_foundation.outcome == 'success'
+        continue-on-error: true
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          set +e
+          python3 deployment/deploy.py deploy-bicep-ai-services \
+            --resource-group "${{ needs.validate.outputs.resource_group }}" \
+            --location "${{ steps.region_select.outputs.primary_region }}" \
+            --location-ml "${{ steps.region_select.outputs.ml_region }}" \
+            --environment "${{ needs.validate.outputs.environment }}" \
+            --template "${{ inputs.template || 'deployment/main-modular.bicep' }}" \
+            --allow-warnings \
+            --git-sha "${{ github.sha }}" \
+            2>&1 | tee -a orchestrator-output.log
+          EXIT_CODE=${PIPESTATUS[0]}
+          set -e
+          exit $EXIT_CODE
+
+      # ── Phase 3 — AI Applications (loraInference / foundryApps / aiGateway / a2aConnections) ──
+      - name: "Bicep Phase 3 — AI Applications"
+        id: deploy_ai_apps
+        if: >-
+          needs.validate.outputs.is_dry_run != 'true' &&
+          steps.deploy_ai_services.outcome == 'success'
+        continue-on-error: true
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          set +e
+          python3 deployment/deploy.py deploy-bicep-ai-apps \
+            --resource-group "${{ needs.validate.outputs.resource_group }}" \
+            --location "${{ steps.region_select.outputs.primary_region }}" \
+            --location-ml "${{ steps.region_select.outputs.ml_region }}" \
+            --environment "${{ needs.validate.outputs.environment }}" \
+            --template "${{ inputs.template || 'deployment/main-modular.bicep' }}" \
+            --allow-warnings \
+            --git-sha "${{ github.sha }}" \
+            2>&1 | tee -a orchestrator-output.log
+          EXIT_CODE=${PIPESTATUS[0]}
+          set -e
+          exit $EXIT_CODE
+
+      # ── Phase 4 — Function Apps (functionApps / mcpServerFunctionApps) ──────
+      # Depends only on Phase 1 (foundation), not on the AI phases.
+      # Runs after Phase 3 in the sequential step order, but only requires
+      # foundation resources — it will run even if AI phases failed.
+      - name: "Bicep Phase 4 — Function Apps"
+        id: deploy_bicep_function_apps
+        if: >-
+          needs.validate.outputs.is_dry_run != 'true' &&
+          steps.deploy_foundation.outcome == 'success'
+        continue-on-error: true
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          set +e
+          python3 deployment/deploy.py deploy-bicep-function-apps \
+            --resource-group "${{ needs.validate.outputs.resource_group }}" \
+            --location "${{ steps.region_select.outputs.primary_region }}" \
+            --location-ml "${{ steps.region_select.outputs.ml_region }}" \
+            --environment "${{ needs.validate.outputs.environment }}" \
+            --template "${{ inputs.template || 'deployment/main-modular.bicep' }}" \
+            --allow-warnings \
+            --git-sha "${{ github.sha }}" \
+            2>&1 | tee -a orchestrator-output.log
+          EXIT_CODE=${PIPESTATUS[0]}
+          set -e
+          exit $EXIT_CODE
+
+      # ── Phase 5 — Governance (policy assignments / cost budget) ─────────────
+      # Independent of all other phases — always runs (resources are conditional
+      # on enableGovernancePolicies and monthlyBudgetAmount template parameters).
+      - name: "Bicep Phase 5 — Governance"
+        id: deploy_governance
         if: needs.validate.outputs.is_dry_run != 'true' && steps.what_if.outcome == 'success'
         continue-on-error: true
         env:
@@ -259,23 +388,42 @@ jobs:
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
         run: |
-          ARGS=(
-            deploy-bicep
-            --resource-group "${{ needs.validate.outputs.resource_group }}"
-            --location "${{ steps.region_select.outputs.primary_region }}"
-            --location-ml "${{ steps.region_select.outputs.ml_region }}"
-            --environment "${{ needs.validate.outputs.environment }}"
-            --template "${{ inputs.template || 'deployment/main-modular.bicep' }}"
-            --allow-warnings
-            --git-sha "${{ github.sha }}"
-          )
-          PARAMS="${{ needs.validate.outputs.parameters_file }}"
-          [[ -n "$PARAMS" && -f "$PARAMS" ]] && ARGS+=(--parameters "$PARAMS")
           set +e
-          python3 deployment/deploy.py "${ARGS[@]}" 2>&1 | tee -a orchestrator-output.log
+          python3 deployment/deploy.py deploy-bicep-governance \
+            --resource-group "${{ needs.validate.outputs.resource_group }}" \
+            --location "${{ steps.region_select.outputs.primary_region }}" \
+            --environment "${{ needs.validate.outputs.environment }}" \
+            --template "${{ inputs.template || 'deployment/main-modular.bicep' }}" \
+            --allow-warnings \
+            --git-sha "${{ github.sha }}" \
+            2>&1 | tee -a orchestrator-output.log
           EXIT_CODE=${PIPESTATUS[0]}
           set -e
           exit $EXIT_CODE
+
+      # ── Synthesize overall Bicep deployment status (backward-compat step ID) ─
+      # Downstream steps gate on `steps.deploy_bicep.outcome == 'success'`.
+      # This step evaluates the outcomes of all 5 phases and exits zero only when
+      # every phase that ran (non-skipped) succeeded.
+      - name: "Bicep Infrastructure Complete"
+        id: deploy_bicep
+        if: always()
+        continue-on-error: true
+        run: |
+          FAILED=0
+          for OUTCOME in \
+            "${{ steps.deploy_foundation.outcome }}" \
+            "${{ steps.deploy_ai_services.outcome }}" \
+            "${{ steps.deploy_ai_apps.outcome }}" \
+            "${{ steps.deploy_bicep_function_apps.outcome }}" \
+            "${{ steps.deploy_governance.outcome }}"; do
+            [[ "$OUTCOME" == "failure" ]] && ((FAILED++)) || true
+          done
+          if [[ $FAILED -gt 0 ]]; then
+            echo "❌ $FAILED Bicep phase(s) failed — check individual phase steps above"
+            exit 1
+          fi
+          echo "✅ All Bicep phases completed successfully"
 
       # ── Pipeline step 6 — Health Check (deploy mode, unless skipped) ──────
       - name: Post-Deploy Health Check
@@ -303,6 +451,58 @@ jobs:
           set -e
           exit $EXIT_CODE
 
+      # ── Pipeline step 7 — Deploy Python Function Apps ─────────────────────
+      - name: Deploy Python Function Apps
+        id: deploy_function_apps
+        if: >-
+          needs.validate.outputs.is_dry_run != 'true' &&
+          steps.deploy_bicep.outcome == 'success' &&
+          inputs.deploy_function_apps == true
+        continue-on-error: true
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          set +e
+          python3 deployment/deploy.py deploy-function-apps \
+            --resource-group "${{ needs.validate.outputs.resource_group }}" \
+            --location "${{ steps.region_select.outputs.primary_region }}" \
+            --environment "${{ needs.validate.outputs.environment }}" \
+            --template "${{ inputs.template || 'deployment/main-modular.bicep' }}" \
+            --allow-warnings \
+            --git-sha "${{ github.sha }}" \
+            2>&1 | tee -a orchestrator-output.log
+          EXIT_CODE=${PIPESTATUS[0]}
+          set -e
+          exit $EXIT_CODE
+
+      # ── Pipeline step 8 — Sync Kernel Configuration ───────────────────────
+      - name: Sync Kernel Configuration
+        id: sync_kernel_config
+        if: >-
+          needs.validate.outputs.is_dry_run != 'true' &&
+          steps.deploy_bicep.outcome == 'success' &&
+          inputs.sync_kernel_config == true
+        continue-on-error: true
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          set +e
+          python3 deployment/deploy.py sync-kernel-config \
+            --resource-group "${{ needs.validate.outputs.resource_group }}" \
+            --location "${{ steps.region_select.outputs.primary_region }}" \
+            --environment "${{ needs.validate.outputs.environment }}" \
+            --template "${{ inputs.template || 'deployment/main-modular.bicep' }}" \
+            --allow-warnings \
+            --git-sha "${{ github.sha }}" \
+            2>&1 | tee -a orchestrator-output.log
+          EXIT_CODE=${PIPESTATUS[0]}
+          set -e
+          exit $EXIT_CODE
+
       # ── Collect overall pipeline status ───────────────────────────────────
       - name: Collect pipeline status
         id: orchestrator
@@ -319,9 +519,20 @@ jobs:
             # Plan mode: what-if must succeed.
             [[ "${{ steps.what_if.outcome }}" == "failure" ]] && FAILED_STEPS+=("what-if")
           else
-            # Deploy mode: what-if and the actual deployment must succeed.
-            [[ "${{ steps.what_if.outcome }}"    == "failure" ]] && FAILED_STEPS+=("what-if")
-            [[ "${{ steps.deploy_bicep.outcome }}" == "failure" ]] && FAILED_STEPS+=("deploy-bicep")
+            # Deploy mode: track per-phase failures for the Bicep infrastructure.
+            [[ "${{ steps.what_if.outcome }}"              == "failure" ]] && FAILED_STEPS+=("what-if")
+            [[ "${{ steps.deploy_foundation.outcome }}"    == "failure" ]] && FAILED_STEPS+=("deploy-bicep-foundation")
+            [[ "${{ steps.deploy_ai_services.outcome }}"   == "failure" ]] && FAILED_STEPS+=("deploy-bicep-ai-services")
+            [[ "${{ steps.deploy_ai_apps.outcome }}"       == "failure" ]] && FAILED_STEPS+=("deploy-bicep-ai-apps")
+            [[ "${{ steps.deploy_bicep_function_apps.outcome }}" == "failure" ]] && FAILED_STEPS+=("deploy-bicep-function-apps")
+            [[ "${{ steps.deploy_governance.outcome }}"    == "failure" ]] && FAILED_STEPS+=("deploy-bicep-governance")
+            # Python infrastructure steps fail the pipeline only when they were requested.
+            if [[ "${{ inputs.deploy_function_apps }}" == "true" ]]; then
+              [[ "${{ steps.deploy_function_apps.outcome }}" == "failure" ]] && FAILED_STEPS+=("deploy-function-apps")
+            fi
+            if [[ "${{ inputs.sync_kernel_config }}" == "true" ]]; then
+              [[ "${{ steps.sync_kernel_config.outcome }}" == "failure" ]] && FAILED_STEPS+=("sync-kernel-config")
+            fi
           fi
 
           if [[ ${#FAILED_STEPS[@]} -gt 0 ]]; then
@@ -439,12 +650,18 @@ jobs:
               *)       echo "⬜ not run" ;;
             esac
           }
-          echo "| Resource Group | $(step_icon "${{ steps.ensure_rg.outcome }}") |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Lint           | $(step_icon "${{ steps.lint.outcome }}") |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Validate       | $(step_icon "${{ steps.arm_validate.outcome }}") |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| What-If        | $(step_icon "${{ steps.what_if.outcome }}") |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Deploy         | $(step_icon "${{ steps.deploy_bicep.outcome }}") |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Health Check   | $(step_icon "${{ steps.health_check.outcome }}") |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Resource Group    | $(step_icon "${{ steps.ensure_rg.outcome }}") |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Lint              | $(step_icon "${{ steps.lint.outcome }}") |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Validate          | $(step_icon "${{ steps.arm_validate.outcome }}") |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| What-If           | $(step_icon "${{ steps.what_if.outcome }}") |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Phase 1** — Foundation       | $(step_icon "${{ steps.deploy_foundation.outcome }}") |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Phase 2** — AI Services      | $(step_icon "${{ steps.deploy_ai_services.outcome }}") |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Phase 3** — AI Applications  | $(step_icon "${{ steps.deploy_ai_apps.outcome }}") |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Phase 4** — Function Apps    | $(step_icon "${{ steps.deploy_bicep_function_apps.outcome }}") |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Phase 5** — Governance       | $(step_icon "${{ steps.deploy_governance.outcome }}") |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Health Check      | $(step_icon "${{ steps.health_check.outcome }}") |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Function Apps     | $(step_icon "${{ steps.deploy_function_apps.outcome }}") |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Kernel Config     | $(step_icon "${{ steps.sync_kernel_config.outcome }}") |" >> "$GITHUB_STEP_SUMMARY"
 
           if [[ -n "$WHAT_IF_CREATES" ]] && [[ "$WHAT_IF_CREATES" != "0" || "$WHAT_IF_NO_CHANGES" != "0" || "$WHAT_IF_MODIFIES" != "0" || "$WHAT_IF_DELETES" != "0" ]]; then
             echo "" >> "$GITHUB_STEP_SUMMARY"
