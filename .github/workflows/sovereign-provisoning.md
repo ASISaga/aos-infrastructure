@@ -9,7 +9,7 @@ on:
         default: 'main'
 permissions:
   contents: read
-  actions: write
+  actions: read
   pull-requests: read
   issues: read
 tools:
