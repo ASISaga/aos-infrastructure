@@ -22,6 +22,7 @@ All mutating operations are audit-logged to JSON files under
 from __future__ import annotations
 
 import json
+import logging
 import re
 import subprocess
 import sys
@@ -39,6 +40,8 @@ from orchestrator.integration.kernel_bridge import KernelBridge
 from orchestrator.integration.sdk_bridge import SDKBridge
 from orchestrator.reliability.drift_detector import DriftDetector
 from orchestrator.reliability.health_monitor import HealthMonitor, HealthStatus
+
+logger = logging.getLogger(__name__)
 
 _AUDIT_DIR = Path(__file__).resolve().parent.parent.parent / "audit"
 
@@ -101,17 +104,188 @@ def _parse_what_if_output(output: str) -> dict[str, int]:
 
 
 class InfrastructureManager:
-    """Orchestrates Azure infrastructure deployments for AOS."""
+    """Orchestrates Azure infrastructure deployments for AOS.
+
+    Supports two deployment modes:
+
+    * **Pipeline mode** (``deploy()``) — sequential CLI-based pipeline
+      (lint → validate → what-if → deploy → health-check).  This is the
+      original open-loop automation path.
+    * **Smart mode** (``smart_deploy()``) — OODA-loop closed-loop
+      orchestration that observes infrastructure state, orients by
+      comparing to desired state and cost constraints, decides the optimal
+      action, and executes with precision.
+
+    Both modes share the same underlying deployment mechanics; smart mode
+    wraps the pipeline with state-aware decision making.
+    """
 
     def __init__(self, config: DeploymentConfig) -> None:
         self.config = config
         # Populated by _what_if() so deploy() can include counts in the audit.
         self._what_if_counts: dict[str, int] = {}
         _AUDIT_DIR.mkdir(parents=True, exist_ok=True)
+        # Lazily initialised Azure SDK client for closed-loop operations.
+        self._sdk_client: Any = None
+
+    def _get_sdk_client(self) -> Any:
+        """Return a cached :class:`AzureSDKClient` instance (or ``None``)."""
+        if self._sdk_client is not None:
+            return self._sdk_client
+        try:
+            from orchestrator.integration.azure_sdk_client import AzureSDKClient
+            self._sdk_client = AzureSDKClient.create(
+                self.config.subscription_id, self.config.resource_group
+            )
+            return self._sdk_client
+        except Exception:  # noqa: BLE001
+            return None
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    def smart_deploy(
+        self,
+        cost_threshold: float = 0.0,
+        auto_approve: bool = False,
+    ) -> bool:
+        """OODA-loop closed-loop deployment — observe → orient → decide → act.
+
+        This method replaces the fire-and-forget CLI pipeline with an
+        intelligent loop that:
+
+        1. **Observes** the current infrastructure state via Azure SDK.
+        2. **Orients** by comparing actual vs desired state, factoring in
+           cost data for frugal resource management.
+        3. **Decides** the optimal action (deploy, skip, remediate, scale-down).
+        4. **Acts** only when the decision warrants it, then verifies the outcome.
+
+        Parameters
+        ----------
+        cost_threshold:
+            Maximum acceptable monthly cost.  When exceeded, the loop
+            recommends a ``scale_down`` action instead of deploying.
+            Pass ``0`` to disable cost-gating.
+        auto_approve:
+            When ``True``, safe actions (skip, incremental_update) are
+            executed automatically.  Destructive actions always require
+            explicit approval.
+
+        Returns
+        -------
+        bool
+            ``True`` when the infrastructure reaches the desired state.
+        """
+        try:
+            from orchestrator.core.ooda_loop import (
+                DesiredState,
+                OODALoop,
+                RecommendedAction,
+            )
+            from orchestrator.integration.azure_sdk_client import AzureSDKClient
+        except ImportError:
+            logger.warning(
+                "OODA loop requires azure SDK packages; falling back to pipeline deploy"
+            )
+            return self.deploy()
+
+        client = self._get_sdk_client()
+        if client is None:
+            logger.warning(
+                "Azure SDK client unavailable; falling back to pipeline deploy"
+            )
+            return self.deploy()
+
+        print(f"🧠 Smart deploy (OODA loop) for {self.config.resource_group} "
+              f"({self.config.environment}) in {self.config.location}")
+
+        # Build desired state from governance config
+        desired = DesiredState(
+            max_monthly_cost=cost_threshold or self.config.governance.budget_amount,
+            required_tags=self.config.governance.required_tags,
+        )
+
+        loop = OODALoop(
+            client=client,
+            desired_state=desired,
+            cost_threshold=cost_threshold or self.config.governance.budget_amount,
+            auto_approve=auto_approve,
+        )
+
+        # Run one OODA cycle
+        include_cost = (
+            cost_threshold > 0 or self.config.governance.budget_amount > 0
+        )
+        cycle = loop.run_cycle(include_cost=include_cost)
+
+        # Print the cycle report
+        print(loop.format_cycle_report(cycle))
+
+        action = cycle.decision.recommended_action
+
+        # Act based on the decision
+        if action == RecommendedAction.SKIP:
+            print("⏭️  OODA: desired state already achieved — skipping deployment")
+            self._audit("smart_deploy", {
+                "status": "skipped",
+                "action": action.value,
+                "rationale": cycle.decision.rationale,
+            })
+            return True
+
+        if action == RecommendedAction.SCALE_DOWN:
+            print("📉 OODA: cost threshold exceeded — deployment blocked")
+            print(f"   Current cost: ${cycle.orientation.current_cost:,.2f}")
+            print(f"   Threshold:    ${cycle.orientation.cost_threshold:,.2f}")
+            self._audit("smart_deploy", {
+                "status": "blocked_cost",
+                "action": action.value,
+                "current_cost": cycle.orientation.current_cost,
+                "cost_threshold": cycle.orientation.cost_threshold,
+            })
+            return False
+
+        if action == RecommendedAction.ALERT:
+            print("🔔 OODA: infrastructure degraded — proceeding with caution")
+
+        if action in (
+            RecommendedAction.DEPLOY,
+            RecommendedAction.INCREMENTAL_UPDATE,
+            RecommendedAction.REMEDIATE,
+            RecommendedAction.ALERT,
+        ):
+            # Proceed with the standard pipeline
+            print(f"🚀 OODA: proceeding with {action.value}")
+            deploy_ok = self.deploy()
+
+            # Post-deploy: verify with another observation cycle
+            if deploy_ok:
+                print("\n🔍 OODA: post-deploy verification …")
+                verify_cycle = loop.run_cycle(include_cost=False)
+                if verify_cycle.orientation.state_matches_desired:
+                    print("✅ OODA: post-deploy verification passed — desired state confirmed")
+                else:
+                    print("⚠️  OODA: post-deploy state drift detected — review recommended")
+
+            self._audit("smart_deploy", {
+                "status": "success" if deploy_ok else "failed",
+                "action": action.value,
+                "rationale": cycle.decision.rationale,
+            })
+            return deploy_ok
+
+        if action == RecommendedAction.BLOCK:
+            print("🚫 OODA: safety constraint prevents deployment")
+            self._audit("smart_deploy", {
+                "status": "blocked",
+                "action": action.value,
+                "rationale": cycle.decision.rationale,
+            })
+            return False
+
+        # Fallback
+        return self.deploy()
 
     def deploy(self) -> bool:
         """Full deployment pipeline: lint → validate → what-if → deploy → health-check.
@@ -664,7 +838,7 @@ class InfrastructureManager:
         """Execute the Reliability pillar steps."""
         rel = self.config.reliability
         hm = HealthMonitor(self.config.resource_group, self.config.environment)
-        dd = DriftDetector(self.config.resource_group)
+        dd = DriftDetector(self.config.resource_group, self.config.subscription_id)
 
         # 1. Health + SLA compliance
         overall, _ = hm.check_all()

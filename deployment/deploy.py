@@ -105,6 +105,13 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("deploy", parents=[deploy_parent], help="Full deployment pipeline")
     subparsers.add_parser("plan", parents=[deploy_parent], help="Dry-run: lint, validate, what-if")
 
+    p_smart = subparsers.add_parser("smart-deploy", parents=[deploy_parent],
+                                    help="OODA-loop closed-loop deployment (observe→orient→decide→act)")
+    p_smart.add_argument("--cost-threshold", type=float, default=0.0,
+                         help="Monthly cost threshold — blocks deploy when exceeded (0 = no limit)")
+    p_smart.add_argument("--auto-approve", action="store_true",
+                         help="Auto-approve safe actions (skip, incremental_update)")
+
     p_automate = subparsers.add_parser("automate", parents=[deploy_parent], help="Automation pillar")
     p_automate.add_argument("--deploy-function-apps", action="store_true",
                             help="Deploy AOS Function Apps via SDK bridge after Bicep")
@@ -241,7 +248,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if step_map[args.command]() else 1
 
     # ── Pillar commands ────────────────────────────────────────────────────
-    if args.command in ("deploy", "plan", "automate"):
+    if args.command in ("deploy", "plan", "automate", "smart-deploy"):
         config = DeploymentConfig.from_args(args)
         if args.command == "automate":
             config = DeploymentConfig(
@@ -265,6 +272,11 @@ def main(argv: list[str] | None = None) -> int:
             return 0 if mgr.deploy() else 1
         if args.command == "plan":
             return 0 if mgr.plan() else 1
+        if args.command == "smart-deploy":
+            return 0 if mgr.smart_deploy(
+                cost_threshold=getattr(args, "cost_threshold", 0.0),
+                auto_approve=getattr(args, "auto_approve", False),
+            ) else 1
         return 0 if mgr.automate() else 1
 
     if args.command == "govern":

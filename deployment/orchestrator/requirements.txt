@@ -1,1 +1,7 @@
 pydantic>=2.12.0
+# Optional Azure SDK packages for closed-loop orchestration (OODA pattern).
+# When installed, the orchestrator uses direct SDK calls instead of az CLI.
+# Install with: pip install -e ".[azure]"
+# azure-identity>=1.16.0
+# azure-mgmt-resource>=23.0.0
+# azure-mgmt-costmanagement>=4.0.0

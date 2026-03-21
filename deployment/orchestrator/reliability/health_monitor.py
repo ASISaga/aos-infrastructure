@@ -2,17 +2,22 @@
 
 ``HealthMonitor`` extends basic health checks with SLA objective tracking,
 multi-resource deep health probes, and an availability summary for AOS
-infrastructure.  It uses ``az`` commands to interrogate resource state.
+infrastructure.  It preferentially uses the Azure Resource Management SDK
+for type-safe, closed-loop state observation and falls back to ``az``
+CLI commands when the SDK is not installed.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 import sys
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 class HealthStatus(str, Enum):
@@ -61,12 +66,34 @@ _RESOURCE_HEALTH_SUPPORTED: set[str] = {
 
 
 class HealthMonitor:
-    """Monitors AOS infrastructure health and tracks SLA compliance."""
+    """Monitors AOS infrastructure health and tracks SLA compliance.
+
+    Supports two execution modes:
+
+    * **SDK mode** — uses :class:`AzureSDKClient` for type-safe resource
+      state queries (closed-loop observation).
+    * **CLI mode** — falls back to ``az`` CLI subprocess calls.
+    """
 
     def __init__(self, resource_group: str, environment: str = "dev") -> None:
         self.resource_group = resource_group
         self.environment = environment
         self.sla_target = _SLA_TARGETS.get(environment, 99.0)
+        self._sdk_client: Any = None
+        self._init_sdk_client()
+
+    def _init_sdk_client(self) -> None:
+        """Attempt to initialise the Azure SDK client for health queries."""
+        try:
+            from orchestrator.integration.azure_sdk_client import AzureSDKClient
+            # HealthMonitor doesn't need subscription_id for resource listing
+            # but the SDK client expects it; pass empty string for CLI fallback.
+            client = AzureSDKClient.create("", self.resource_group)
+            if client.sdk_available:
+                self._sdk_client = client
+                logger.info("HealthMonitor: using Azure SDK for health monitoring")
+        except Exception:  # noqa: BLE001
+            pass
 
     # ------------------------------------------------------------------
     # Public API
@@ -75,15 +102,45 @@ class HealthMonitor:
     def check_all(self) -> tuple[HealthStatus, list[ResourceHealth]]:
         """Run a full health check across all resources in the resource group.
 
+        Uses the Azure SDK when available for closed-loop state observation;
+        falls back to ``az resource list`` otherwise.
+
         Returns ``(overall_status, resource_healths)``.
         """
         print(f"🏥 Running full health check for {self.resource_group} ({self.environment})")
+
+        # SDK-based closed-loop observation
+        if self._sdk_client is not None:
+            try:
+                from orchestrator.integration.azure_sdk_client import ProvisioningState as PS
+                sdk_resources = self._sdk_client.list_resources()
+                if sdk_resources is not None:
+                    healths: list[ResourceHealth] = []
+                    for r in sdk_resources:
+                        status = HealthStatus.HEALTHY if r.is_healthy else (
+                            HealthStatus.UNHEALTHY if r.provisioning_state in (PS.FAILED, PS.CANCELED)
+                            else HealthStatus.DEGRADED
+                        )
+                        healths.append(ResourceHealth(
+                            name=r.name,
+                            resource_type=r.resource_type,
+                            status=status,
+                            provisioning_state=r.provisioning_state.value,
+                            details=f"provisioningState={r.provisioning_state.value}",
+                        ))
+                    overall = self._aggregate_status(healths)
+                    self._print_health_report(healths, overall)
+                    return overall, healths
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("SDK health check failed, falling back to CLI: %s", exc)
+
+        # CLI fallback
         resources = self._list_resources()
         if not resources:
             print("  No resources found.")
             return HealthStatus.UNKNOWN, []
 
-        healths: list[ResourceHealth] = []
+        healths = []
         for res in resources:
             h = self._check_resource(res)
             healths.append(h)

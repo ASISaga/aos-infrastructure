@@ -19,6 +19,11 @@ dev = [
     "pytest>=8.0.0",
     "pylint>=3.0.0",
 ]
+azure = [
+    "azure-identity>=1.16.0",
+    "azure-mgmt-resource>=23.0.0",
+    "azure-mgmt-costmanagement>=4.0.0",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["deployment/tests"]

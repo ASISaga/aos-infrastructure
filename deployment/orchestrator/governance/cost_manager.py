@@ -1,29 +1,54 @@
 """Governance pillar — Azure Cost Management and budget enforcement.
 
 ``CostManager`` retrieves current spend, forecasts, and manages budget
-alerts for AOS resource groups.  It uses ``az consumption`` and
-``az consumption budget`` commands.
+alerts for AOS resource groups.  It preferentially uses the Azure Cost
+Management SDK (``azure-mgmt-costmanagement``) for type-safe, closed-loop
+cost queries.  When the SDK is not installed it falls back to ``az
+consumption`` CLI commands.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 import sys
 from datetime import date, timedelta
 from typing import Any
 
+logger = logging.getLogger(__name__)
 
 # Default budget thresholds (% of limit) that trigger alerts
 _DEFAULT_ALERT_THRESHOLDS: list[int] = [50, 80, 100]
 
 
 class CostManager:
-    """Manages Azure cost visibility and budget enforcement for AOS."""
+    """Manages Azure cost visibility and budget enforcement for AOS.
+
+    Supports two execution modes:
+
+    * **SDK mode** — uses :class:`AzureSDKClient` when available, providing
+      structured cost data via the Azure Cost Management Query API.
+    * **CLI mode** — falls back to ``az consumption`` subprocess calls.
+    """
 
     def __init__(self, resource_group: str, subscription_id: str = "") -> None:
         self.resource_group = resource_group
         self.subscription_id = subscription_id
+        self._sdk_client: Any = None
+        self._init_sdk_client()
+
+    def _init_sdk_client(self) -> None:
+        """Attempt to initialise the Azure SDK client for cost queries."""
+        try:
+            from orchestrator.integration.azure_sdk_client import AzureSDKClient
+            if self.subscription_id:
+                client = AzureSDKClient.create(self.subscription_id, self.resource_group)
+                if client.sdk_available:
+                    self._sdk_client = client
+                    logger.info("CostManager: using Azure SDK for cost queries")
+        except Exception:  # noqa: BLE001
+            pass
 
     # ------------------------------------------------------------------
     # Public API
@@ -31,6 +56,9 @@ class CostManager:
 
     def get_current_spend(self, period_days: int = 30) -> dict[str, Any]:
         """Return the current cost summary for the resource group.
+
+        Preferentially uses the Azure Cost Management SDK (closed-loop) and
+        falls back to ``az consumption usage list`` when unavailable.
 
         Parameters
         ----------
@@ -45,6 +73,18 @@ class CostManager:
         - ``by_service``: list of ``{service, cost}`` breakdowns
         """
         print(f"💰 Fetching cost data for {self.resource_group} (last {period_days}d)")
+
+        # Try SDK-based cost query first (closed-loop)
+        if self._sdk_client is not None:
+            try:
+                cost = self._sdk_client.get_current_cost(period_days)
+                summary = cost.to_dict()
+                self._print_cost_summary(summary)
+                return summary
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("SDK cost query failed, falling back to CLI: %s", exc)
+
+        # CLI fallback (open-loop)
         end = date.today()
         start = end - timedelta(days=period_days)
 
