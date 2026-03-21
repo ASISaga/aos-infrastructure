@@ -542,6 +542,39 @@ class TestInfrastructureManagerSteps:
 
     @mock.patch.object(InfrastructureManager, "_query_phase_deployment_status", return_value=True)
     @mock.patch.object(InfrastructureManager, "_run")
+    def test_deploy_phase_excludes_location_when_include_location_false(
+        self, mock_run: mock.Mock, _mock_status: mock.Mock, manager: InfrastructureManager
+    ) -> None:
+        """Phase templates without a `location` param (e.g. governance) must not receive it."""
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+        manager._deploy_phase(
+            "deployment/phases/05-governance.bicep", "governance",
+            include_location=False, include_location_ml=False,
+        )
+        cmd = mock_run.call_args[0][0]
+        params_idx = cmd.index("--parameters")
+        overrides = cmd[params_idx + 1:]
+        assert not any(o.startswith("location=") for o in overrides)
+        assert not any(o.startswith("locationML=") for o in overrides)
+
+    @mock.patch.object(InfrastructureManager, "_query_phase_deployment_status", return_value=True)
+    @mock.patch.object(InfrastructureManager, "_run")
+    def test_deploy_phase_excludes_location_ml_when_include_location_ml_false(
+        self, mock_run: mock.Mock, _mock_status: mock.Mock, manager: InfrastructureManager
+    ) -> None:
+        """Phase templates without a `locationML` param (e.g. foundation) must not receive it."""
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+        manager._deploy_phase(
+            "deployment/phases/01-foundation.bicep", "foundation",
+            include_location_ml=False,
+        )
+        cmd = mock_run.call_args[0][0]
+        params_idx = cmd.index("--parameters")
+        overrides = cmd[params_idx + 1:]
+        assert not any(o.startswith("locationML=") for o in overrides)
+
+    @mock.patch.object(InfrastructureManager, "_query_phase_deployment_status", return_value=True)
+    @mock.patch.object(InfrastructureManager, "_run")
     def test_deploy_phase_returns_false_on_nonzero_exit(
         self, mock_run: mock.Mock, _mock_status: mock.Mock, manager: InfrastructureManager
     ) -> None:
@@ -554,7 +587,8 @@ class TestInfrastructureManagerSteps:
     ) -> None:
         assert manager.deploy_bicep_foundation() is True
         mock_phase.assert_called_once_with(
-            "deployment/phases/01-foundation.bicep", "foundation"
+            "deployment/phases/01-foundation.bicep", "foundation",
+            include_location_ml=False,
         )
 
     @mock.patch.object(InfrastructureManager, "_deploy_phase", return_value=True)
@@ -581,7 +615,8 @@ class TestInfrastructureManagerSteps:
     ) -> None:
         assert manager.deploy_bicep_function_apps() is True
         mock_phase.assert_called_once_with(
-            "deployment/phases/04-function-apps.bicep", "function-apps"
+            "deployment/phases/04-function-apps.bicep", "function-apps",
+            include_location_ml=False,
         )
 
     @mock.patch.object(InfrastructureManager, "_deploy_phase", return_value=True)
@@ -590,8 +625,21 @@ class TestInfrastructureManagerSteps:
     ) -> None:
         assert manager.deploy_bicep_governance() is True
         mock_phase.assert_called_once_with(
-            "deployment/phases/05-governance.bicep", "governance"
+            "deployment/phases/05-governance.bicep", "governance",
+            include_location=False,
+            include_location_ml=False,
         )
+
+    @mock.patch.object(InfrastructureManager, "_az")
+    def test_query_phase_deployment_status_uses_correct_az_command(
+        self, mock_az: mock.Mock, manager: InfrastructureManager
+    ) -> None:
+        """Must use `az deployment operation group list`, not `az deployment group operation list`."""
+        mock_az.return_value = json.dumps([])
+        manager._query_phase_deployment_status("phase-foundation-dev")
+        call_args = mock_az.call_args[0][0]
+        # Correct order: deployment → operation → group → list
+        assert call_args[:4] == ["deployment", "operation", "group", "list"]
 
     @mock.patch.object(InfrastructureManager, "_az")
     def test_query_phase_deployment_status_returns_true_when_all_succeeded(
