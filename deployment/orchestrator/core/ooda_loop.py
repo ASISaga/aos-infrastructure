@@ -511,6 +511,8 @@ class OODALoop:
         }
 
         missing = sorted(expected_names - observed_names)
+        # Only flag unexpected resources when expected_resources is specified;
+        # an empty desired list means "no expectations" — not "nothing should exist".
         unexpected = sorted(observed_names - expected_names) if expected_names else []
         unhealthy = [r.name for r in snapshot.unhealthy_resources]
         return missing, unexpected, unhealthy

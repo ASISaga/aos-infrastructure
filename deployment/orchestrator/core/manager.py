@@ -28,7 +28,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, Optional
 
 from orchestrator.core.config import DeploymentConfig
 from orchestrator.automation.lifecycle import LifecycleManager
@@ -40,6 +40,9 @@ from orchestrator.integration.kernel_bridge import KernelBridge
 from orchestrator.integration.sdk_bridge import SDKBridge
 from orchestrator.reliability.drift_detector import DriftDetector
 from orchestrator.reliability.health_monitor import HealthMonitor, HealthStatus
+
+if TYPE_CHECKING:
+    from orchestrator.integration.azure_sdk_client import AzureSDKClient
 
 logger = logging.getLogger(__name__)
 
@@ -119,9 +122,9 @@ class InfrastructureManager:
         self._what_if_counts: dict[str, int] = {}
         _AUDIT_DIR.mkdir(parents=True, exist_ok=True)
         # Azure SDK client for closed-loop operations — initialised on demand.
-        self._sdk_client: Any = None
+        self._sdk_client: Optional[AzureSDKClient] = None
 
-    def _get_sdk_client(self) -> Any:
+    def _get_sdk_client(self) -> Optional[AzureSDKClient]:
         """Return a cached :class:`AzureSDKClient` instance (or ``None``).
 
         Returns ``None`` only when ``subscription_id`` is not configured,
@@ -304,7 +307,9 @@ class InfrastructureManager:
                 print(f"  Resources: {pre_snapshot.total_resources} total, "
                       f"{pre_snapshot.healthy_resources} healthy")
             except Exception as exc:  # noqa: BLE001
-                logger.warning("Pre-deploy observation failed: %s", exc)
+                # Observation is advisory; failures should not block deployment.
+                # The pipeline itself validates via what-if and health-check.
+                logger.warning("Pre-deploy observation failed (non-blocking): %s", exc)
 
         ok = self._run_pipeline()
         if not ok:
@@ -323,7 +328,8 @@ class InfrastructureManager:
                 if new_count > 0:
                     print(f"  📈 {new_count} new resource(s) provisioned")
             except Exception as exc:  # noqa: BLE001
-                logger.warning("Post-deploy observation failed: %s", exc)
+                # Post-deploy verification is advisory; deployment already succeeded.
+                logger.warning("Post-deploy verification failed (non-blocking): %s", exc)
 
         return True
 
