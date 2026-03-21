@@ -519,7 +519,11 @@ class InfrastructureManager:
         Deploys the core platform resources that every other Bicep phase depends on.
         Safe to run first and independently.
         """
-        return self._deploy_phase("deployment/phases/01-foundation.bicep", "foundation")
+        return self._deploy_phase(
+            "deployment/phases/01-foundation.bicep",
+            "foundation",
+            include_location_ml=False,
+        )
 
     def deploy_bicep_ai_services(self) -> bool:
         """Deploy Phase 2 — AI Services (aiServices, aiHub, aiProject, modelRegistry).
@@ -540,7 +544,11 @@ class InfrastructureManager:
 
         Requires Phase 1 (foundation) to be deployed first.
         """
-        return self._deploy_phase("deployment/phases/04-function-apps.bicep", "function-apps")
+        return self._deploy_phase(
+            "deployment/phases/04-function-apps.bicep",
+            "function-apps",
+            include_location_ml=False,
+        )
 
     def deploy_bicep_governance(self) -> bool:
         """Deploy Phase 5 — Governance (policy assignments, cost budget).
@@ -549,7 +557,12 @@ class InfrastructureManager:
         ``enableGovernancePolicies=false`` and ``monthlyBudgetAmount=0``.
         Independent of other phases — safe to run at any time.
         """
-        return self._deploy_phase("deployment/phases/05-governance.bicep", "governance")
+        return self._deploy_phase(
+            "deployment/phases/05-governance.bicep",
+            "governance",
+            include_location=False,
+            include_location_ml=False,
+        )
 
     # ------------------------------------------------------------------
     # Private helpers — three-pillar lifecycle
@@ -896,17 +909,24 @@ class InfrastructureManager:
 
     _SHA_RE = re.compile(r"^[a-fA-F0-9]{7,40}$")
 
-    def _deploy_phase(self, phase_template: str, phase_name: str) -> bool:
+    def _deploy_phase(
+        self,
+        phase_template: str,
+        phase_name: str,
+        *,
+        include_location: bool = True,
+        include_location_ml: bool = True,
+    ) -> bool:
         """Deploy a phase-specific Bicep template as a named ARM incremental deployment.
 
         Each phase runs ``az deployment group create`` against the given template
-        with the same inline parameter overrides used by the full deploy (environment,
-        location, locationML, git-sha tags).  Bicep ``.bicepparam`` parameter files
+        with inline parameter overrides scoped to the parameters that the specific
+        phase template actually declares.  Bicep ``.bicepparam`` parameter files
         are **not** used for phase deployments — phases use template defaults for
         all parameters not overridden inline.
 
         After the ARM deployment completes (success **or** failure), the method
-        queries ``az deployment group operation list`` to display a per-module
+        queries ``az deployment operation group list`` to display a per-module
         provisioning status table — the "proper azure-provisioning status reporting"
         required by the phase-based workflow.
 
@@ -918,6 +938,15 @@ class InfrastructureManager:
         phase_name:
             Short slug used in the ARM deployment name (e.g. ``"foundation"``).
             The full deployment name will be ``phase-<phase_name>-<environment>``.
+        include_location:
+            When ``True`` (default), the ``location`` override is added.  Set to
+            ``False`` for phases whose Bicep template has no ``location`` parameter
+            (e.g. Phase 5 — Governance).
+        include_location_ml:
+            When ``True`` (default), the ``locationML`` override is added when
+            ``config.location_ml`` is non-empty.  Set to ``False`` for phases
+            whose Bicep template has no ``locationML`` parameter (e.g. Phase 1 —
+            Foundation and Phase 4 — Function Apps).
 
         Returns
         -------
@@ -932,12 +961,11 @@ class InfrastructureManager:
             "--name", deployment_name,
             "--output", "none",
         ]
-        # Inline parameter overrides — same set as _deployment_cmd()
-        overrides: list[str] = [
-            f"environment={self.config.environment}",
-            f"location={self.config.location}",
-        ]
-        if self.config.location_ml:
+        # Inline parameter overrides — only include params supported by this phase's template.
+        overrides: list[str] = [f"environment={self.config.environment}"]
+        if include_location:
+            overrides.append(f"location={self.config.location}")
+        if include_location_ml and self.config.location_ml:
             overrides.append(f"locationML={self.config.location_ml}")
         if self.config.git_sha and self._SHA_RE.match(self.config.git_sha):
             overrides.append(f'tags={{"gitSha":"{self.config.git_sha}"}}')
@@ -965,7 +993,7 @@ class InfrastructureManager:
         """Query ARM deployment operations and print a per-module provisioning status table.
 
         After each phase deployment (success or failure), this method calls
-        ``az deployment group operation list`` to surface each Bicep module's
+        ``az deployment operation group list`` to surface each Bicep module's
         provisioning state from Azure.  This is the "proper azure-provisioning status
         reporting" — each module (e.g. ``monitoring-aos-staging``) gets an
         individual ✅/❌/⏳ status line.
@@ -981,7 +1009,7 @@ class InfrastructureManager:
             ``True`` when all reported operations are in ``"Succeeded"`` state.
         """
         result = self._az([
-            "deployment", "group", "operation", "list",
+            "deployment", "operation", "group", "list",
             "--resource-group", self.config.resource_group,
             "--name", deployment_name,
             "--query", (

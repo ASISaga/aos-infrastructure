@@ -298,15 +298,18 @@ jobs:
       # ── Phase 2 — AI Services (aiServices / aiHub / aiProject / modelRegistry) ──
       - name: "Bicep Phase 2 — AI Services"
         id: deploy_ai_services
-        if: >-
-          needs.validate.outputs.is_dry_run != 'true' &&
-          steps.deploy_foundation.outcome == 'success'
+        if: always() && needs.validate.outputs.is_dry_run != 'true' && steps.what_if.outcome == 'success'
         continue-on-error: true
         env:
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          FOUNDATION_OUTCOME: ${{ steps.deploy_foundation.outcome }}
         run: |
+          if [[ "$FOUNDATION_OUTCOME" != "success" ]]; then
+            echo "⏭️  Phase 2 (AI Services) — no action: Phase 1 (Foundation) did not succeed (outcome: $FOUNDATION_OUTCOME)" | tee -a orchestrator-output.log
+            exit 0
+          fi
           set +e
           python3 deployment/deploy.py deploy-bicep-ai-services \
             --resource-group "${{ needs.validate.outputs.resource_group }}" \
@@ -324,15 +327,19 @@ jobs:
       # ── Phase 3 — AI Applications (loraInference / foundryApps / aiGateway / a2aConnections) ──
       - name: "Bicep Phase 3 — AI Applications"
         id: deploy_ai_apps
-        if: >-
-          needs.validate.outputs.is_dry_run != 'true' &&
-          steps.deploy_ai_services.outcome == 'success'
+        if: always() && needs.validate.outputs.is_dry_run != 'true' && steps.what_if.outcome == 'success'
         continue-on-error: true
         env:
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          FOUNDATION_OUTCOME: ${{ steps.deploy_foundation.outcome }}
+          AI_SERVICES_OUTCOME: ${{ steps.deploy_ai_services.outcome }}
         run: |
+          if [[ "$FOUNDATION_OUTCOME" != "success" || "$AI_SERVICES_OUTCOME" != "success" ]]; then
+            echo "⏭️  Phase 3 (AI Applications) — no action: prerequisite phase did not succeed (foundation: $FOUNDATION_OUTCOME, ai-services: $AI_SERVICES_OUTCOME)" | tee -a orchestrator-output.log
+            exit 0
+          fi
           set +e
           python3 deployment/deploy.py deploy-bicep-ai-apps \
             --resource-group "${{ needs.validate.outputs.resource_group }}" \
@@ -353,15 +360,18 @@ jobs:
       # foundation resources — it will run even if AI phases failed.
       - name: "Bicep Phase 4 — Function Apps"
         id: deploy_bicep_function_apps
-        if: >-
-          needs.validate.outputs.is_dry_run != 'true' &&
-          steps.deploy_foundation.outcome == 'success'
+        if: always() && needs.validate.outputs.is_dry_run != 'true' && steps.what_if.outcome == 'success'
         continue-on-error: true
         env:
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          FOUNDATION_OUTCOME: ${{ steps.deploy_foundation.outcome }}
         run: |
+          if [[ "$FOUNDATION_OUTCOME" != "success" ]]; then
+            echo "⏭️  Phase 4 (Function Apps) — no action: Phase 1 (Foundation) did not succeed (outcome: $FOUNDATION_OUTCOME)" | tee -a orchestrator-output.log
+            exit 0
+          fi
           set +e
           python3 deployment/deploy.py deploy-bicep-function-apps \
             --resource-group "${{ needs.validate.outputs.resource_group }}" \
