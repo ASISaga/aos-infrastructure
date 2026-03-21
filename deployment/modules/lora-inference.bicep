@@ -27,6 +27,9 @@ param workspaceId string
 @description('Base model asset ID from an Azure ML registry. Defaults to Llama-3.3-70B-Instruct version 9 from the azureml-meta registry (verified available in eastus2 for fine-tuning / chat-completion LoRA adapters).')
 param baseModelId string = 'azureml://registries/azureml-meta/models/Llama-3.3-70B-Instruct/versions/9'
 
+@description('When true, creates the serverless endpoint resource. Set to false (default) to skip endpoint creation until the model version is confirmed available in the target region. Deploy infrastructure first, then re-deploy with deployEndpoint=true once model availability is verified.')
+param deployEndpoint bool = false
+
 // ====================================================================
 // Variables
 // ====================================================================
@@ -41,9 +44,11 @@ var endpointName = 'ep-lora-shared-${environment}-${endpointSuffix}'
 // Serverless Endpoint (shared by all C-suite agents)
 // Azure manages the underlying GPU compute — no subscription quota required.
 // This is the default inference experience selected by ml.azure.com for catalog models.
+// Conditional on deployEndpoint=true to allow infrastructure provisioning before the
+// specific model version is confirmed available in the target region.
 // ====================================================================
 
-resource llamaEndpoint 'Microsoft.MachineLearningServices/workspaces/serverlessEndpoints@2024-10-01' = {
+resource llamaEndpoint 'Microsoft.MachineLearningServices/workspaces/serverlessEndpoints@2024-10-01' = if (deployEndpoint) {
   name: '${split(workspaceId, '/')[8]}/${endpointName}'
   location: location
   tags: tags
@@ -66,6 +71,9 @@ resource llamaEndpoint 'Microsoft.MachineLearningServices/workspaces/serverlessE
 // ====================================================================
 
 output endpointName string = endpointName
-output deploymentName string = endpointName
-output endpointId string = llamaEndpoint.id
-output scoringUri string = llamaEndpoint.properties.inferenceEndpoint.uri
+@description('The deployment/endpoint name, or empty string when deployEndpoint=false (no endpoint created yet).')
+output deploymentName string = deployEndpoint ? endpointName : ''
+// Non-null assertion (!) is safe: the ternary condition mirrors the `if (deployEndpoint)` resource
+// guard, so llamaEndpoint is guaranteed to exist when deployEndpoint=true.
+output endpointId string = deployEndpoint ? llamaEndpoint!.id : ''
+output scoringUri string = deployEndpoint ? llamaEndpoint!.properties.inferenceEndpoint.uri : ''

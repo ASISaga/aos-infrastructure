@@ -48,6 +48,9 @@ param foundryAppNames array = [
 @description('When true, creates online deployments for each foundry agent. Set to false to provision only the endpoint shells until LoRA adapters are registered.')
 param deployFoundryModels bool = false
 
+@description('When true, creates the shared LoRA inference serverless endpoint. Set to false (default) to skip endpoint creation until the model version is confirmed available in the target region.')
+param deployLoraEndpoint bool = false
+
 @description('Enable nested ARM deployment of the provided agentTemplate for each foundry app')
 param useAgentNestedDeployment bool = false
 
@@ -109,6 +112,7 @@ module loraInference '../modules/lora-inference.bicep' = {
     projectName: projectName
     tags: tags
     workspaceId: existingAiProject.id
+    deployEndpoint: deployLoraEndpoint
   }
 }
 
