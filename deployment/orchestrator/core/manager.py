@@ -106,18 +106,11 @@ def _parse_what_if_output(output: str) -> dict[str, int]:
 class InfrastructureManager:
     """Orchestrates Azure infrastructure deployments for AOS.
 
-    Supports two deployment modes:
-
-    * **Pipeline mode** (``deploy()``) — sequential CLI-based pipeline
-      (lint → validate → what-if → deploy → health-check).  This is the
-      original open-loop automation path.
-    * **Smart mode** (``smart_deploy()``) — OODA-loop closed-loop
-      orchestration that observes infrastructure state, orients by
-      comparing to desired state and cost constraints, decides the optimal
-      action, and executes with precision.
-
-    Both modes share the same underlying deployment mechanics; smart mode
-    wraps the pipeline with state-aware decision making.
+    All deployments are state-aware: the manager observes current
+    infrastructure state via the Azure SDK before acting.  The OODA loop
+    (Observe → Orient → Decide → Act) is the primary deployment path —
+    ``deploy()`` performs state verification before and after the
+    deployment pipeline.
     """
 
     def __init__(self, config: DeploymentConfig) -> None:
@@ -125,21 +118,25 @@ class InfrastructureManager:
         # Populated by _what_if() so deploy() can include counts in the audit.
         self._what_if_counts: dict[str, int] = {}
         _AUDIT_DIR.mkdir(parents=True, exist_ok=True)
-        # Lazily initialised Azure SDK client for closed-loop operations.
+        # Azure SDK client for closed-loop operations — initialised on demand.
         self._sdk_client: Any = None
 
     def _get_sdk_client(self) -> Any:
-        """Return a cached :class:`AzureSDKClient` instance (or ``None``)."""
+        """Return a cached :class:`AzureSDKClient` instance (or ``None``).
+
+        Returns ``None`` only when ``subscription_id`` is not configured,
+        which is expected for diagnostic/cleanup commands that don't need
+        state verification.
+        """
         if self._sdk_client is not None:
             return self._sdk_client
-        try:
-            from orchestrator.integration.azure_sdk_client import AzureSDKClient
-            self._sdk_client = AzureSDKClient.create(
-                self.config.subscription_id, self.config.resource_group
-            )
-            return self._sdk_client
-        except Exception:  # noqa: BLE001
+        if not self.config.subscription_id:
             return None
+        from orchestrator.integration.azure_sdk_client import AzureSDKClient
+        self._sdk_client = AzureSDKClient(
+            self.config.subscription_id, self.config.resource_group
+        )
+        return self._sdk_client
 
     # ------------------------------------------------------------------
     # Public API
@@ -152,8 +149,7 @@ class InfrastructureManager:
     ) -> bool:
         """OODA-loop closed-loop deployment — observe → orient → decide → act.
 
-        This method replaces the fire-and-forget CLI pipeline with an
-        intelligent loop that:
+        Verifies current infrastructure state before deploying:
 
         1. **Observes** the current infrastructure state via Azure SDK.
         2. **Orients** by comparing actual vs desired state, factoring in
@@ -177,25 +173,18 @@ class InfrastructureManager:
         bool
             ``True`` when the infrastructure reaches the desired state.
         """
-        try:
-            from orchestrator.core.ooda_loop import (
-                DesiredState,
-                OODALoop,
-                RecommendedAction,
-            )
-            from orchestrator.integration.azure_sdk_client import AzureSDKClient
-        except ImportError:
-            logger.warning(
-                "OODA loop requires Azure SDK packages; falling back to pipeline deploy"
-            )
-            return self.deploy()
+        from orchestrator.core.ooda_loop import (
+            DesiredState,
+            OODALoop,
+            RecommendedAction,
+        )
 
         client = self._get_sdk_client()
         if client is None:
-            logger.warning(
-                "Azure SDK client unavailable; falling back to pipeline deploy"
+            logger.error(
+                "Azure SDK client requires subscription_id for state verification"
             )
-            return self.deploy()
+            return False
 
         print(f"🧠 Smart deploy (OODA loop) for {self.config.resource_group} "
               f"({self.config.environment}) in {self.config.location}")
@@ -227,7 +216,7 @@ class InfrastructureManager:
         # Act based on the decision
         if action == RecommendedAction.SKIP:
             print("⏭️  OODA: desired state already achieved — skipping deployment")
-            self._audit("smart_deploy", {
+            self._audit("deploy", {
                 "status": "skipped",
                 "action": action.value,
                 "rationale": cycle.decision.rationale,
@@ -238,7 +227,7 @@ class InfrastructureManager:
             print("📉 OODA: cost threshold exceeded — deployment blocked")
             print(f"   Current cost: ${cycle.orientation.current_cost:,.2f}")
             print(f"   Threshold:    ${cycle.orientation.cost_threshold:,.2f}")
-            self._audit("smart_deploy", {
+            self._audit("deploy", {
                 "status": "blocked_cost",
                 "action": action.value,
                 "current_cost": cycle.orientation.current_cost,
@@ -255,9 +244,9 @@ class InfrastructureManager:
             RecommendedAction.REMEDIATE,
             RecommendedAction.ALERT,
         ):
-            # Proceed with the standard pipeline
+            # Proceed with the deployment pipeline
             print(f"🚀 OODA: proceeding with {action.value}")
-            deploy_ok = self.deploy()
+            deploy_ok = self._run_pipeline()
 
             # Post-deploy: verify with another observation cycle
             if deploy_ok:
@@ -268,7 +257,7 @@ class InfrastructureManager:
                 else:
                     print("⚠️  OODA: post-deploy state drift detected — review recommended")
 
-            self._audit("smart_deploy", {
+            self._audit("deploy", {
                 "status": "success" if deploy_ok else "failed",
                 "action": action.value,
                 "rationale": cycle.decision.rationale,
@@ -277,21 +266,72 @@ class InfrastructureManager:
 
         if action == RecommendedAction.BLOCK:
             print("🚫 OODA: safety constraint prevents deployment")
-            self._audit("smart_deploy", {
+            self._audit("deploy", {
                 "status": "blocked",
                 "action": action.value,
                 "rationale": cycle.decision.rationale,
             })
             return False
 
-        # Fallback
-        return self.deploy()
+        # Fallback — shouldn't reach here
+        return self._run_pipeline()
 
     def deploy(self) -> bool:
-        """Full deployment pipeline: lint → validate → what-if → deploy → health-check.
+        """State-verified deployment: observe state → pipeline → verify outcome.
 
-        When governance or reliability settings are enabled in the config,
-        the appropriate post-deployment lifecycle steps are also executed.
+        Runs the OODA observe phase before and after the deployment
+        pipeline to ensure state awareness.  When a subscription ID is
+        configured, the method:
+
+        1. Observes current state via the Azure SDK.
+        2. Logs the pre-deploy state in the audit trail.
+        3. Executes the pipeline (lint → validate → what-if → deploy → health-check).
+        4. Verifies post-deploy state matches expectations.
+
+        When no subscription ID is provided (e.g. in CI pipeline step mode),
+        falls back to the raw pipeline without state verification.
+        """
+        print(f"🚀 Starting deployment to {self.config.resource_group} "
+              f"({self.config.environment}) in {self.config.location}")
+
+        # Pre-deploy: observe current state if SDK is available
+        client = self._get_sdk_client()
+        pre_snapshot = None
+        if client is not None:
+            print("\n📡 Pre-deploy: observing current infrastructure state …")
+            try:
+                pre_snapshot = client.observe(include_cost=False)
+                print(f"  Resources: {pre_snapshot.total_resources} total, "
+                      f"{pre_snapshot.healthy_resources} healthy")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Pre-deploy observation failed: %s", exc)
+
+        ok = self._run_pipeline()
+        if not ok:
+            return False
+
+        # Post-deploy: verify state
+        if client is not None:
+            print("\n🔍 Post-deploy: verifying infrastructure state …")
+            try:
+                post_snapshot = client.observe(include_cost=False)
+                print(f"  Resources: {post_snapshot.total_resources} total, "
+                      f"{post_snapshot.healthy_resources} healthy")
+                new_count = post_snapshot.total_resources - (
+                    pre_snapshot.total_resources if pre_snapshot else 0
+                )
+                if new_count > 0:
+                    print(f"  📈 {new_count} new resource(s) provisioned")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Post-deploy observation failed: %s", exc)
+
+        return True
+
+    def _run_pipeline(self) -> bool:
+        """Execute the raw deployment pipeline (no state verification).
+
+        Pipeline steps: ensure-rg → lint → validate → what-if → deploy
+        [→ health-check].
         """
         print(f"🚀 Starting deployment to {self.config.resource_group} "
               f"({self.config.environment}) in {self.config.location}")

@@ -1,20 +1,17 @@
 """Governance pillar — Azure Cost Management and budget enforcement.
 
 ``CostManager`` retrieves current spend, forecasts, and manages budget
-alerts for AOS resource groups.  It preferentially uses the Azure Cost
-Management SDK (``azure-mgmt-costmanagement``) for type-safe, closed-loop
-cost queries.  When the SDK is not installed it falls back to ``az
-consumption`` CLI commands.
+alerts for AOS resource groups.  It uses the Azure Cost Management SDK
+(``azure-mgmt-costmanagement``) via :class:`AzureSDKClient` for type-safe,
+closed-loop cost queries.
 """
 
 from __future__ import annotations
 
-import json
 import logging
-import subprocess
-import sys
-from datetime import date, timedelta
 from typing import Any
+
+from orchestrator.integration.azure_sdk_client import AzureSDKClient
 
 logger = logging.getLogger(__name__)
 
@@ -25,30 +22,14 @@ _DEFAULT_ALERT_THRESHOLDS: list[int] = [50, 80, 100]
 class CostManager:
     """Manages Azure cost visibility and budget enforcement for AOS.
 
-    Supports two execution modes:
-
-    * **SDK mode** — uses :class:`AzureSDKClient` when available, providing
-      structured cost data via the Azure Cost Management Query API.
-    * **CLI mode** — falls back to ``az consumption`` subprocess calls.
+    Uses :class:`AzureSDKClient` for structured cost data via the Azure
+    Cost Management Query API.
     """
 
-    def __init__(self, resource_group: str, subscription_id: str = "") -> None:
+    def __init__(self, resource_group: str, subscription_id: str) -> None:
         self.resource_group = resource_group
         self.subscription_id = subscription_id
-        self._sdk_client: Any = None
-        self._init_sdk_client()
-
-    def _init_sdk_client(self) -> None:
-        """Attempt to initialise the Azure SDK client for cost queries."""
-        try:
-            from orchestrator.integration.azure_sdk_client import AzureSDKClient
-            if self.subscription_id:
-                client = AzureSDKClient.create(self.subscription_id, self.resource_group)
-                if client.sdk_available:
-                    self._sdk_client = client
-                    logger.info("CostManager: using Azure SDK for cost queries")
-        except Exception:  # noqa: BLE001
-            pass
+        self._client = AzureSDKClient(subscription_id, resource_group)
 
     # ------------------------------------------------------------------
     # Public API
@@ -57,8 +38,7 @@ class CostManager:
     def get_current_spend(self, period_days: int = 30) -> dict[str, Any]:
         """Return the current cost summary for the resource group.
 
-        Preferentially uses the Azure Cost Management SDK (closed-loop) and
-        falls back to ``az consumption usage list`` when unavailable.
+        Uses the Azure Cost Management SDK for type-safe cost queries.
 
         Parameters
         ----------
@@ -73,64 +53,8 @@ class CostManager:
         - ``by_service``: list of ``{service, cost}`` breakdowns
         """
         print(f"💰 Fetching cost data for {self.resource_group} (last {period_days}d)")
-
-        # Try SDK-based cost query first (closed-loop)
-        if self._sdk_client is not None:
-            try:
-                cost = self._sdk_client.get_current_cost(period_days)
-                summary = cost.to_dict()
-                self._print_cost_summary(summary)
-                return summary
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("SDK cost query failed, falling back to CLI: %s", exc)
-
-        # CLI fallback (open-loop)
-        end = date.today()
-        start = end - timedelta(days=period_days)
-
-        result = self._az([
-            "consumption", "usage", "list",
-            "--start-date", start.isoformat(),
-            "--end-date", end.isoformat(),
-            "--output", "json",
-        ])
-        if result is None:
-            return {
-                "currency": "USD",
-                "total_cost": 0.0,
-                "period_start": start.isoformat(),
-                "period_end": end.isoformat(),
-                "by_service": [],
-            }
-
-        usage: list[dict[str, Any]] = json.loads(result)
-        # Filter to resource group
-        rg_lower = self.resource_group.lower()
-        rg_usage = [
-            u for u in usage
-            if rg_lower in (u.get("instanceId") or "").lower()
-        ]
-
-        total = sum(float(u.get("pretaxCost", 0)) for u in rg_usage)
-        currency = rg_usage[0].get("currency", "USD") if rg_usage else "USD"
-
-        # Group by service
-        service_costs: dict[str, float] = {}
-        for u in rg_usage:
-            svc = u.get("meterCategory", "Other")
-            service_costs[svc] = service_costs.get(svc, 0.0) + float(u.get("pretaxCost", 0))
-        by_service = [
-            {"service": svc, "cost": round(cost, 4)}
-            for svc, cost in sorted(service_costs.items(), key=lambda x: -x[1])
-        ]
-
-        summary = {
-            "currency": currency,
-            "total_cost": round(total, 4),
-            "period_start": start.isoformat(),
-            "period_end": end.isoformat(),
-            "by_service": by_service,
-        }
+        cost = self._client.get_current_cost(period_days)
+        summary = cost.to_dict()
         self._print_cost_summary(summary)
         return summary
 
@@ -157,53 +81,91 @@ class CostManager:
         contact_emails:
             Email addresses to notify on threshold breach.
         """
+        from datetime import date
+
         print(f"📊 Creating budget '{name}' (${amount:,.2f}) for {self.resource_group}")
         thresholds = thresholds or _DEFAULT_ALERT_THRESHOLDS
         contact_emails = contact_emails or []
 
-        # Build budget period (current month to end of year)
-        today = date.today()
-        start = today.replace(day=1).isoformat()
-        end = today.replace(month=12, day=31).isoformat()
+        try:
+            from azure.mgmt.costmanagement import CostManagementClient  # type: ignore[import]
+            from azure.identity import DefaultAzureCredential  # type: ignore[import]
 
-        cmd = [
-            "az", "consumption", "budget", "create",
-            "--budget-name", f"aos-{name}-{environment}",
-            "--amount", str(amount),
-            "--time-grain", "Monthly",
-            "--start-date", start,
-            "--end-date", end,
-            "--resource-group", self.resource_group,
-            "--output", "json",
-        ]
-        if contact_emails:
-            cmd += ["--contact-emails"] + contact_emails
-        if thresholds:
-            cmd += ["--thresholds"] + [str(t) for t in thresholds]
+            credential = DefaultAzureCredential()
+            cost_client = CostManagementClient(credential)
 
-        result = subprocess.run(cmd, capture_output=True, text=True)  # noqa: S603
-        ok = result.returncode == 0
-        icon = "✅" if ok else "⚠️"
-        print(f"  {icon} Budget '{name}': {'created' if ok else 'failed'}")
-        return ok
+            today = date.today()
+            start_date = today.replace(day=1).isoformat() + "T00:00:00Z"
+            end_date = today.replace(month=12, day=31).isoformat() + "T23:59:59Z"
+
+            scope = (
+                f"/subscriptions/{self.subscription_id}"
+                f"/resourceGroups/{self.resource_group}"
+            )
+            budget_name = f"aos-{name}-{environment}"
+
+            notifications: dict[str, Any] = {}
+            for i, threshold_pct in enumerate(thresholds):
+                key = f"alert_{threshold_pct}"
+                notif: dict[str, Any] = {
+                    "enabled": True,
+                    "operator": "GreaterThanOrEqualTo",
+                    "threshold": threshold_pct,
+                    "thresholdType": "Actual",
+                    "contactEmails": contact_emails,
+                }
+                notifications[key] = notif
+
+            budget_body = {
+                "category": "Cost",
+                "amount": amount,
+                "timeGrain": "Monthly",
+                "timePeriod": {
+                    "startDate": start_date,
+                    "endDate": end_date,
+                },
+                "notifications": notifications,
+            }
+
+            cost_client.budgets.create_or_update(scope, budget_name, budget_body)
+            print(f"  ✅ Budget '{budget_name}': created")
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Budget creation failed: %s", exc)
+            print(f"  ⚠️ Budget '{name}': failed — {exc}")
+            return False
 
     def list_budgets(self) -> list[dict[str, Any]]:
         """Return all budgets associated with the resource group."""
-        result = self._az([
-            "consumption", "budget", "list",
-            "--resource-group", self.resource_group,
-            "--output", "json",
-        ])
-        if result is None:
+        try:
+            from azure.mgmt.costmanagement import CostManagementClient  # type: ignore[import]
+            from azure.identity import DefaultAzureCredential  # type: ignore[import]
+
+            credential = DefaultAzureCredential()
+            cost_client = CostManagementClient(credential)
+
+            scope = (
+                f"/subscriptions/{self.subscription_id}"
+                f"/resourceGroups/{self.resource_group}"
+            )
+
+            budgets_result = cost_client.budgets.list(scope)
+            budgets: list[dict[str, Any]] = []
+            for b in budgets_result:
+                amount = b.amount or 0
+                current = b.current_spend.amount if b.current_spend else 0
+                name = b.name or "N/A"
+                pct = round(100 * float(current) / float(amount), 1) if amount else 0
+                print(f"  💰 {name}: ${current:,.2f} / ${amount:,.2f} ({pct}%)")
+                budgets.append({
+                    "name": name,
+                    "amount": float(amount),
+                    "currentSpend": {"amount": float(current)},
+                })
+            return budgets
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to list budgets: %s", exc)
             return []
-        budgets: list[dict[str, Any]] = json.loads(result)
-        for b in budgets:
-            amount = b.get("amount", 0)
-            current = b.get("currentSpend", {}).get("amount", 0)
-            name = b.get("name", "N/A")
-            pct = round(100 * float(current) / float(amount), 1) if amount else 0
-            print(f"  💰 {name}: ${current:,.2f} / ${amount:,.2f} ({pct}%)")
-        return budgets
 
     def check_budget_alerts(self) -> list[str]:
         """Return a list of budget names that have exceeded their alert thresholds."""
@@ -223,16 +185,6 @@ class CostManager:
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
-
-    def _az(self, args: list[str]) -> str | None:
-        """Run an ``az`` command and return stdout, or *None* on failure."""
-        result = subprocess.run(["az"] + args, capture_output=True, text=True)  # noqa: S603
-        if result.returncode != 0:
-            print(f"  az command failed (rc={result.returncode})", file=sys.stderr)
-            if result.stderr:
-                print(f"  {result.stderr.strip()}", file=sys.stderr)
-            return None
-        return result.stdout
 
     @staticmethod
     def _print_cost_summary(summary: dict[str, Any]) -> None:

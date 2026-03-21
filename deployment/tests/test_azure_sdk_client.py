@@ -1,12 +1,11 @@
 """Tests for the Azure SDK client wrapper.
 
-Validates that ``AzureSDKClient`` correctly wraps Azure SDK operations
-and degrades gracefully to CLI when the SDK is not installed.
+Validates that ``AzureSDKClient`` correctly wraps Azure SDK operations.
+All tests mock the Azure SDK — no CLI fallback paths.
 """
 
 from __future__ import annotations
 
-import json
 from unittest import mock
 
 import pytest
@@ -50,6 +49,11 @@ class TestProvisioningState:
 
     def test_from_str_none(self) -> None:
         assert ProvisioningState.from_str(None) == ProvisioningState.UNKNOWN
+
+    def test_all_states_roundtrip(self) -> None:
+        """Every ProvisioningState should parse back from its own value."""
+        for state in ProvisioningState:
+            assert ProvisioningState.from_str(state.value) == state
 
 
 # ====================================================================
@@ -106,6 +110,20 @@ class TestResourceState:
         assert d["provisioning_state"] == "Succeeded"
         assert d["tags"] == {"env": "dev"}
 
+    def test_not_healthy_when_creating(self) -> None:
+        r = ResourceState(
+            name="test", resource_type="t", location="l",
+            provisioning_state=ProvisioningState.CREATING,
+        )
+        assert r.is_healthy is False
+
+    def test_is_terminal_canceled(self) -> None:
+        r = ResourceState(
+            name="test", resource_type="t", location="l",
+            provisioning_state=ProvisioningState.CANCELED,
+        )
+        assert r.is_terminal is True
+
 
 # ====================================================================
 # CostSummary tests
@@ -130,6 +148,30 @@ class TestCostSummary:
         assert d["currency"] == "EUR"
         assert d["total_cost"] == 42.5
         assert len(d["by_service"]) == 1
+
+
+# ====================================================================
+# DeploymentState tests
+# ====================================================================
+
+
+class TestDeploymentState:
+    """Tests for DeploymentState dataclass."""
+
+    def test_defaults(self) -> None:
+        d = DeploymentState()
+        assert d.name == ""
+        assert d.provisioning_state == ProvisioningState.UNKNOWN
+
+    def test_to_dict(self) -> None:
+        d = DeploymentState(
+            name="phase-1",
+            provisioning_state=ProvisioningState.SUCCEEDED,
+            timestamp="2026-01-01T10:00:00Z",
+        )
+        result = d.to_dict()
+        assert result["name"] == "phase-1"
+        assert result["provisioning_state"] == "Succeeded"
 
 
 # ====================================================================
@@ -168,40 +210,53 @@ class TestInfrastructureSnapshot:
         assert snap.total_resources == 0
         assert snap.healthy_resources == 0
 
-
-# ====================================================================
-# AzureSDKClient CLI fallback tests
-# ====================================================================
-
-
-class TestAzureSDKClientCliFallback:
-    """Test the CLI-fallback paths (SDK not installed)."""
-
-    @mock.patch("orchestrator.integration.azure_sdk_client._is_azure_sdk_available", return_value=False)
-    def test_sdk_not_available(self, _mock_sdk: mock.MagicMock) -> None:
-        client = AzureSDKClient("sub-123", "rg-test")
-        assert client.sdk_available is False
-
-    @mock.patch("orchestrator.integration.azure_sdk_client._is_azure_sdk_available", return_value=False)
-    @mock.patch("subprocess.run")
-    def test_list_resources_cli_fallback(
-        self, mock_run: mock.MagicMock, _mock_sdk: mock.MagicMock,
-    ) -> None:
-        mock_run.return_value = mock.Mock(
-            returncode=0,
-            stdout=json.dumps([
-                {
-                    "name": "myapp",
-                    "type": "Microsoft.Web/sites",
-                    "location": "eastus",
-                    "provisioningState": "Succeeded",
-                    "id": "/sub/rg/myapp",
-                    "sku": {"name": "Standard"},
-                    "kind": "functionapp",
-                    "tags": {"env": "dev"},
-                },
-            ]),
+    def test_to_dict(self) -> None:
+        snap = InfrastructureSnapshot(
+            resource_group="rg-test",
+            timestamp="2026-01-01T00:00:00Z",
+            resources=[self._make_resource("a", ProvisioningState.SUCCEEDED)],
+            cost=CostSummary(total_cost=10.0),
         )
+        d = snap.to_dict()
+        assert d["total_resources"] == 1
+        assert d["healthy_resources"] == 1
+        assert d["cost"]["total_cost"] == 10.0
+
+
+# ====================================================================
+# AzureSDKClient tests (mocked SDK)
+# ====================================================================
+
+
+class TestAzureSDKClient:
+    """Test AzureSDKClient using mocked Azure SDK."""
+
+    @mock.patch("orchestrator.integration.azure_sdk_client.ResourceManagementClient")
+    @mock.patch("orchestrator.integration.azure_sdk_client.DefaultAzureCredential")
+    def test_create(self, mock_cred: mock.MagicMock, mock_rmc: mock.MagicMock) -> None:
+        client = AzureSDKClient.create("sub-123", "rg-test")
+        assert client.subscription_id == "sub-123"
+        assert client.resource_group == "rg-test"
+        mock_cred.assert_called_once()
+        mock_rmc.assert_called_once()
+
+    @mock.patch("orchestrator.integration.azure_sdk_client.ResourceManagementClient")
+    @mock.patch("orchestrator.integration.azure_sdk_client.DefaultAzureCredential")
+    def test_list_resources(self, mock_cred: mock.MagicMock, mock_rmc: mock.MagicMock) -> None:
+        mock_resource = mock.MagicMock()
+        mock_resource.name = "myapp"
+        mock_resource.type = "Microsoft.Web/sites"
+        mock_resource.location = "eastus"
+        mock_resource.provisioning_state = "Succeeded"
+        mock_resource.id = "/sub/rg/myapp"
+        mock_resource.sku = mock.MagicMock(name="Standard")
+        mock_resource.sku.name = "Standard"
+        mock_resource.kind = "functionapp"
+        mock_resource.tags = {"env": "dev"}
+
+        mock_rmc_instance = mock_rmc.return_value
+        mock_rmc_instance.resources.list_by_resource_group.return_value = [mock_resource]
+
         client = AzureSDKClient("sub-123", "rg-test")
         resources = client.list_resources()
         assert len(resources) == 1
@@ -209,120 +264,119 @@ class TestAzureSDKClientCliFallback:
         assert resources[0].provisioning_state == ProvisioningState.SUCCEEDED
         assert resources[0].sku == "Standard"
 
-    @mock.patch("orchestrator.integration.azure_sdk_client._is_azure_sdk_available", return_value=False)
-    @mock.patch("subprocess.run")
-    def test_list_resources_cli_failure(
-        self, mock_run: mock.MagicMock, _mock_sdk: mock.MagicMock,
-    ) -> None:
-        mock_run.return_value = mock.Mock(returncode=1, stdout="", stderr="error")
-        client = AzureSDKClient("sub-123", "rg-test")
-        resources = client.list_resources()
-        assert resources == []
+    @mock.patch("orchestrator.integration.azure_sdk_client.ResourceManagementClient")
+    @mock.patch("orchestrator.integration.azure_sdk_client.DefaultAzureCredential")
+    def test_get_resource_found(self, mock_cred: mock.MagicMock, mock_rmc: mock.MagicMock) -> None:
+        mock_resource = mock.MagicMock()
+        mock_resource.name = "myapp"
+        mock_resource.type = "T"
+        mock_resource.location = "l"
+        mock_resource.provisioning_state = "Succeeded"
+        mock_resource.id = "id1"
+        mock_resource.sku = None
+        mock_resource.kind = ""
+        mock_resource.tags = None
 
-    @mock.patch("orchestrator.integration.azure_sdk_client._is_azure_sdk_available", return_value=False)
-    @mock.patch("subprocess.run")
-    def test_list_deployments_cli_fallback(
-        self, mock_run: mock.MagicMock, _mock_sdk: mock.MagicMock,
-    ) -> None:
-        mock_run.return_value = mock.Mock(
-            returncode=0,
-            stdout=json.dumps([
-                {
-                    "name": "phase-foundation-dev",
-                    "properties": {
-                        "provisioningState": "Succeeded",
-                        "timestamp": "2026-01-01T10:00:00Z",
-                        "duration": "PT5M",
-                    },
-                },
-            ]),
-        )
-        client = AzureSDKClient("sub-123", "rg-test")
-        deployments = client.list_deployments()
-        assert len(deployments) == 1
-        assert deployments[0].name == "phase-foundation-dev"
-        assert deployments[0].provisioning_state == ProvisioningState.SUCCEEDED
+        mock_rmc_instance = mock_rmc.return_value
+        mock_rmc_instance.resources.list_by_resource_group.return_value = [mock_resource]
 
-    @mock.patch("orchestrator.integration.azure_sdk_client._is_azure_sdk_available", return_value=False)
-    @mock.patch("subprocess.run")
-    def test_get_cost_cli_fallback(
-        self, mock_run: mock.MagicMock, _mock_sdk: mock.MagicMock,
-    ) -> None:
-        mock_run.return_value = mock.Mock(
-            returncode=0,
-            stdout=json.dumps([
-                {
-                    "instanceId": "/subscriptions/sub-123/resourceGroups/rg-test/providers/Microsoft.Storage/storageAccounts/sa",
-                    "pretaxCost": 15.5,
-                    "currency": "USD",
-                    "meterCategory": "Storage",
-                },
-                {
-                    "instanceId": "/subscriptions/sub-123/resourceGroups/rg-other/providers/Microsoft.Compute/vm",
-                    "pretaxCost": 100.0,
-                    "currency": "USD",
-                    "meterCategory": "Compute",
-                },
-            ]),
-        )
         client = AzureSDKClient("sub-123", "rg-test")
-        cost = client.get_current_cost(30)
-        assert cost.total_cost == 15.5  # Only the matching RG
-        assert len(cost.by_service) == 1
-        assert cost.by_service[0]["service"] == "Storage"
+        r = client.get_resource("myapp")
+        assert r is not None
+        assert r.name == "myapp"
 
-    @mock.patch("orchestrator.integration.azure_sdk_client._is_azure_sdk_available", return_value=False)
-    @mock.patch("subprocess.run")
+    @mock.patch("orchestrator.integration.azure_sdk_client.ResourceManagementClient")
+    @mock.patch("orchestrator.integration.azure_sdk_client.DefaultAzureCredential")
+    def test_get_resource_not_found(self, mock_cred: mock.MagicMock, mock_rmc: mock.MagicMock) -> None:
+        mock_rmc_instance = mock_rmc.return_value
+        mock_rmc_instance.resources.list_by_resource_group.return_value = []
+
+        client = AzureSDKClient("sub-123", "rg-test")
+        assert client.get_resource("nonexistent") is None
+
+    @mock.patch("orchestrator.integration.azure_sdk_client.ResourceManagementClient")
+    @mock.patch("orchestrator.integration.azure_sdk_client.DefaultAzureCredential")
+    def test_list_deployments(self, mock_cred: mock.MagicMock, mock_rmc: mock.MagicMock) -> None:
+        mock_dep = mock.MagicMock()
+        mock_dep.name = "phase-1"
+        mock_dep.properties.provisioning_state = "Succeeded"
+        mock_dep.properties.timestamp.isoformat.return_value = "2026-01-01T10:00:00Z"
+        mock_dep.properties.duration = "PT5M"
+        mock_dep.properties.error = None
+
+        mock_rmc_instance = mock_rmc.return_value
+        mock_rmc_instance.deployments.list_by_resource_group.return_value = [mock_dep]
+
+        client = AzureSDKClient("sub-123", "rg-test")
+        deps = client.list_deployments()
+        assert len(deps) == 1
+        assert deps[0].name == "phase-1"
+        assert deps[0].provisioning_state == ProvisioningState.SUCCEEDED
+
+    @mock.patch("orchestrator.integration.azure_sdk_client.ResourceManagementClient")
+    @mock.patch("orchestrator.integration.azure_sdk_client.DefaultAzureCredential")
     def test_observe_combines_resources_and_deployments(
-        self, mock_run: mock.MagicMock, _mock_sdk: mock.MagicMock,
+        self, mock_cred: mock.MagicMock, mock_rmc: mock.MagicMock,
     ) -> None:
         """Test that observe() produces a complete snapshot."""
-        def side_effect(cmd, **kwargs):
-            # Distinguish between resource list and deployment list
-            if "resource" in cmd and "list" in cmd:
-                return mock.Mock(
-                    returncode=0,
-                    stdout=json.dumps([
-                        {"name": "r1", "type": "T", "location": "l",
-                         "provisioningState": "Succeeded", "id": "id1"},
-                    ]),
-                )
-            if "deployment" in cmd and "group" in cmd and "list" in cmd:
-                return mock.Mock(
-                    returncode=0,
-                    stdout=json.dumps([
-                        {"name": "d1", "properties": {"provisioningState": "Succeeded",
-                                                       "timestamp": "2026-01-01"}},
-                    ]),
-                )
-            return mock.Mock(returncode=1, stdout="", stderr="")
+        mock_resource = mock.MagicMock()
+        mock_resource.name = "r1"
+        mock_resource.type = "T"
+        mock_resource.location = "l"
+        mock_resource.provisioning_state = "Succeeded"
+        mock_resource.id = "id1"
+        mock_resource.sku = None
+        mock_resource.kind = ""
+        mock_resource.tags = None
 
-        mock_run.side_effect = side_effect
+        mock_dep = mock.MagicMock()
+        mock_dep.name = "d1"
+        mock_dep.properties.provisioning_state = "Succeeded"
+        mock_dep.properties.timestamp.isoformat.return_value = "2026-01-01"
+        mock_dep.properties.duration = None
+        mock_dep.properties.error = None
+
+        mock_rmc_instance = mock_rmc.return_value
+        mock_rmc_instance.resources.list_by_resource_group.return_value = [mock_resource]
+        mock_rmc_instance.deployments.list_by_resource_group.return_value = [mock_dep]
+
         client = AzureSDKClient("sub-123", "rg-test")
         snapshot = client.observe(include_cost=False)
         assert snapshot.resource_group == "rg-test"
         assert snapshot.total_resources == 1
         assert len(snapshot.deployments) == 1
 
-    @mock.patch("orchestrator.integration.azure_sdk_client._is_azure_sdk_available", return_value=False)
-    def test_get_resource_by_name(self, _mock_sdk: mock.MagicMock) -> None:
-        client = AzureSDKClient("sub-123", "rg-test")
-        with mock.patch.object(client, "list_resources", return_value=[
-            ResourceState(name="myapp", resource_type="T", location="l",
-                          provisioning_state=ProvisioningState.SUCCEEDED),
-        ]):
-            r = client.get_resource("myapp")
-            assert r is not None
-            assert r.name == "myapp"
+    @mock.patch("orchestrator.integration.azure_sdk_client.ResourceManagementClient")
+    @mock.patch("orchestrator.integration.azure_sdk_client.DefaultAzureCredential")
+    def test_list_deployments_top_limit(
+        self, mock_cred: mock.MagicMock, mock_rmc: mock.MagicMock,
+    ) -> None:
+        """list_deployments(top=2) should return at most 2 results."""
+        mock_deps = []
+        for i in range(5):
+            d = mock.MagicMock()
+            d.name = f"dep-{i}"
+            d.properties.provisioning_state = "Succeeded"
+            d.properties.timestamp.isoformat.return_value = f"2026-01-0{i+1}"
+            d.properties.duration = None
+            d.properties.error = None
+            mock_deps.append(d)
 
-    @mock.patch("orchestrator.integration.azure_sdk_client._is_azure_sdk_available", return_value=False)
-    def test_get_resource_not_found(self, _mock_sdk: mock.MagicMock) -> None:
-        client = AzureSDKClient("sub-123", "rg-test")
-        with mock.patch.object(client, "list_resources", return_value=[]):
-            assert client.get_resource("nonexistent") is None
+        mock_rmc_instance = mock_rmc.return_value
+        mock_rmc_instance.deployments.list_by_resource_group.return_value = mock_deps
 
-    @mock.patch("orchestrator.integration.azure_sdk_client._is_azure_sdk_available", return_value=False)
-    def test_create_factory(self, _mock_sdk: mock.MagicMock) -> None:
-        client = AzureSDKClient.create("sub-123", "rg-test")
-        assert client.subscription_id == "sub-123"
-        assert client.resource_group == "rg-test"
+        client = AzureSDKClient("sub-123", "rg-test")
+        deps = client.list_deployments(top=2)
+        assert len(deps) == 2
+
+    @mock.patch("orchestrator.integration.azure_sdk_client.ResourceManagementClient")
+    @mock.patch("orchestrator.integration.azure_sdk_client.DefaultAzureCredential")
+    def test_list_resources_empty(
+        self, mock_cred: mock.MagicMock, mock_rmc: mock.MagicMock,
+    ) -> None:
+        mock_rmc_instance = mock_rmc.return_value
+        mock_rmc_instance.resources.list_by_resource_group.return_value = []
+
+        client = AzureSDKClient("sub-123", "rg-test")
+        resources = client.list_resources()
+        assert resources == []

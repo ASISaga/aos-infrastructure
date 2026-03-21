@@ -1,11 +1,10 @@
 """Closed-loop OODA orchestration — Observe, Orient, Decide, Act.
 
 Implements the `Boyd OODA loop <https://en.wikipedia.org/wiki/OODA_loop>`_
-for intelligent infrastructure management.  Instead of fire-and-forget CLI
-invocations (open-loop), the OODA loop continuously observes the actual
-infrastructure state, orients by comparing it to the desired state and cost
-constraints, decides what actions are needed, acts with precision, and then
-verifies the outcome.
+for intelligent infrastructure management.  The OODA loop observes the
+actual infrastructure state via the Azure SDK, orients by comparing it to
+the desired state and cost constraints, decides what actions are needed,
+acts with precision, and then verifies the outcome.
 
 The four phases:
 

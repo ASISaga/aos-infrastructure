@@ -5,9 +5,8 @@ what-if or a saved manifest) with the live Azure resource state to
 identify configuration drift.  Drift is reported as a list of findings
 categorised as ``missing``, ``unexpected``, or ``changed``.
 
-When the Azure Management SDK is available, the detector uses typed
-:class:`AzureSDKClient` queries for closed-loop state observation;
-otherwise it falls back to ``az`` CLI subprocess calls.
+Uses the Azure Management SDK via :class:`AzureSDKClient` for
+closed-loop state observation.
 """
 
 from __future__ import annotations
@@ -19,6 +18,8 @@ import sys
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
+
+from orchestrator.integration.azure_sdk_client import AzureSDKClient
 
 logger = logging.getLogger(__name__)
 
@@ -64,27 +65,14 @@ _MONITORED_PROPERTIES: set[str] = {
 class DriftDetector:
     """Detects configuration drift between desired and live Azure infrastructure.
 
-    Uses the Azure SDK when available for closed-loop state observation;
-    falls back to ``az`` CLI subprocess calls otherwise.
+    Uses the Azure SDK via :class:`AzureSDKClient` for closed-loop state
+    observation.
     """
 
-    def __init__(self, resource_group: str, subscription_id: str = "") -> None:
+    def __init__(self, resource_group: str, subscription_id: str) -> None:
         self.resource_group = resource_group
         self.subscription_id = subscription_id
-        self._sdk_client: Any = None
-        self._init_sdk_client()
-
-    def _init_sdk_client(self) -> None:
-        """Attempt to initialise the Azure SDK client."""
-        try:
-            from orchestrator.integration.azure_sdk_client import AzureSDKClient
-            if self.subscription_id:
-                client = AzureSDKClient.create(self.subscription_id, self.resource_group)
-                if client.sdk_available:
-                    self._sdk_client = client
-                    logger.info("DriftDetector: using Azure SDK for state observation")
-        except Exception:  # noqa: BLE001
-            pass
+        self._client = AzureSDKClient(subscription_id, resource_group)
 
     # ------------------------------------------------------------------
     # Public API
@@ -204,34 +192,13 @@ class DriftDetector:
             return None
 
     def _list_live_resources(self) -> list[dict[str, Any]] | None:
-        """List all live resources in the resource group.
-
-        Uses Azure SDK when available; falls back to CLI.
-        """
-        # SDK-based closed-loop observation
-        if self._sdk_client is not None:
-            try:
-                sdk_resources = self._sdk_client.list_resources()
-                return [r.to_dict() for r in sdk_resources]
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("SDK list_resources failed, falling back to CLI: %s", exc)
-
-        # CLI fallback
-        result = subprocess.run(
-            [
-                "az", "resource", "list",
-                "--resource-group", self.resource_group,
-                "--output", "json",
-            ],
-            capture_output=True, text=True,
-        )  # noqa: S603
-        if result.returncode != 0:
-            print(f"  az resource list failed: {result.stderr.strip()}", file=sys.stderr)
-            return None
+        """List all live resources in the resource group via SDK."""
         try:
-            return json.loads(result.stdout)
-        except json.JSONDecodeError:
-            return []
+            sdk_resources = self._client.list_resources()
+            return [r.to_dict() for r in sdk_resources]
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("SDK list_resources failed: %s", exc)
+            return None
 
     @staticmethod
     def _parse_what_if(what_if_output: dict[str, Any]) -> list[DriftFinding]:

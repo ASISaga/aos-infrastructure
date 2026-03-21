@@ -176,55 +176,53 @@ class TestPolicyManager:
 class TestCostManager:
     @pytest.fixture()
     def cm(self) -> CostManager:
-        return CostManager("rg-test", "sub-123")
+        with mock.patch("orchestrator.governance.cost_manager.AzureSDKClient"):
+            return CostManager("rg-test", "sub-123")
 
-    @mock.patch.object(CostManager, "_az")
-    def test_get_current_spend_empty(self, mock_az: mock.Mock, cm: CostManager) -> None:
-        mock_az.return_value = json.dumps([])
+    def test_get_current_spend_empty(self, cm: CostManager) -> None:
+        from orchestrator.integration.azure_sdk_client import CostSummary
+        cm._client.get_current_cost.return_value = CostSummary(
+            currency="USD", total_cost=0.0, period_start="2026-01-01",
+            period_end="2026-01-31", by_service=[],
+        )
         result = cm.get_current_spend()
         assert result["total_cost"] == 0.0
         assert result["by_service"] == []
 
-    @mock.patch.object(CostManager, "_az")
-    def test_get_current_spend_with_data(self, mock_az: mock.Mock, cm: CostManager) -> None:
-        usage = [
-            {
-                "instanceId": "/subscriptions/sub/resourceGroups/rg-test/providers/Microsoft.Storage/storage1",
-                "pretaxCost": "12.50",
-                "currency": "USD",
-                "meterCategory": "Storage",
-            },
-            {
-                "instanceId": "/subscriptions/sub/resourceGroups/rg-test/providers/Microsoft.Web/func1",
-                "pretaxCost": "8.00",
-                "currency": "USD",
-                "meterCategory": "Azure Functions",
-            },
-        ]
-        mock_az.return_value = json.dumps(usage)
+    def test_get_current_spend_with_data(self, cm: CostManager) -> None:
+        from orchestrator.integration.azure_sdk_client import CostSummary
+        cm._client.get_current_cost.return_value = CostSummary(
+            currency="USD", total_cost=20.50, period_start="2026-01-01",
+            period_end="2026-01-31",
+            by_service=[
+                {"service": "Storage", "cost": 12.50},
+                {"service": "Azure Functions", "cost": 8.00},
+            ],
+        )
         result = cm.get_current_spend()
         assert result["total_cost"] == pytest.approx(20.50, abs=0.01)
         assert result["currency"] == "USD"
         assert len(result["by_service"]) == 2
 
-    @mock.patch.object(CostManager, "_az")
-    def test_list_budgets_empty(self, mock_az: mock.Mock, cm: CostManager) -> None:
-        mock_az.return_value = json.dumps([])
-        budgets = cm.list_budgets()
+    def test_list_budgets_empty(self, cm: CostManager) -> None:
+        with mock.patch("azure.mgmt.costmanagement.CostManagementClient") as mock_cmc, \
+             mock.patch("azure.identity.DefaultAzureCredential"):
+            mock_cmc.return_value.budgets.list.return_value = []
+            budgets = cm.list_budgets()
         assert budgets == []
 
-    @mock.patch.object(CostManager, "_az")
-    def test_check_budget_alerts_no_alerts(self, mock_az: mock.Mock, cm: CostManager) -> None:
-        budgets = [{"name": "aos-budget-dev", "amount": 500, "currentSpend": {"amount": 100}}]
-        mock_az.return_value = json.dumps(budgets)
-        alerts = cm.check_budget_alerts()
+    def test_check_budget_alerts_no_alerts(self, cm: CostManager) -> None:
+        with mock.patch.object(cm, "list_budgets", return_value=[
+            {"name": "aos-budget-dev", "amount": 500, "currentSpend": {"amount": 100}},
+        ]):
+            alerts = cm.check_budget_alerts()
         assert alerts == []
 
-    @mock.patch.object(CostManager, "_az")
-    def test_check_budget_alerts_threshold_exceeded(self, mock_az: mock.Mock, cm: CostManager) -> None:
-        budgets = [{"name": "aos-budget-prod", "amount": 500, "currentSpend": {"amount": 450}}]
-        mock_az.return_value = json.dumps(budgets)
-        alerts = cm.check_budget_alerts()
+    def test_check_budget_alerts_threshold_exceeded(self, cm: CostManager) -> None:
+        with mock.patch.object(cm, "list_budgets", return_value=[
+            {"name": "aos-budget-prod", "amount": 500, "currentSpend": {"amount": 450}},
+        ]):
+            alerts = cm.check_budget_alerts()
         assert "aos-budget-prod" in alerts
 
 
@@ -280,10 +278,12 @@ class TestRbacManager:
 class TestDriftDetector:
     @pytest.fixture()
     def dd(self) -> DriftDetector:
-        return DriftDetector("rg-test")
+        with mock.patch("orchestrator.reliability.drift_detector.AzureSDKClient"):
+            return DriftDetector("rg-test", "sub-123")
 
     def test_detect_drift_from_manifest_no_drift(self) -> None:
-        dd = DriftDetector("rg-test")
+        with mock.patch("orchestrator.reliability.drift_detector.AzureSDKClient"):
+            dd = DriftDetector("rg-test", "sub-123")
         manifest = [{"name": "storage1", "type": "Microsoft.Storage/storageAccounts", "location": "eastus"}]
         live = [{"name": "storage1", "type": "Microsoft.Storage/storageAccounts", "location": "eastus"}]
         with mock.patch.object(dd, "_list_live_resources", return_value=live):
@@ -291,7 +291,8 @@ class TestDriftDetector:
         assert findings == []
 
     def test_detect_drift_missing_resource(self) -> None:
-        dd = DriftDetector("rg-test")
+        with mock.patch("orchestrator.reliability.drift_detector.AzureSDKClient"):
+            dd = DriftDetector("rg-test", "sub-123")
         manifest = [{"name": "storage1", "type": "Microsoft.Storage/storageAccounts", "location": "eastus"}]
         live: list = []
         with mock.patch.object(dd, "_list_live_resources", return_value=live):
@@ -300,7 +301,8 @@ class TestDriftDetector:
         assert findings[0].kind == DriftKind.MISSING
 
     def test_detect_drift_unexpected_resource(self) -> None:
-        dd = DriftDetector("rg-test")
+        with mock.patch("orchestrator.reliability.drift_detector.AzureSDKClient"):
+            dd = DriftDetector("rg-test", "sub-123")
         manifest: list = []
         live = [{"name": "rogue-storage", "type": "Microsoft.Storage/storageAccounts", "location": "eastus"}]
         with mock.patch.object(dd, "_list_live_resources", return_value=live):
@@ -309,7 +311,8 @@ class TestDriftDetector:
         assert findings[0].kind == DriftKind.UNEXPECTED
 
     def test_detect_drift_location_changed(self) -> None:
-        dd = DriftDetector("rg-test")
+        with mock.patch("orchestrator.reliability.drift_detector.AzureSDKClient"):
+            dd = DriftDetector("rg-test", "sub-123")
         manifest = [{"name": "kv1", "type": "Microsoft.KeyVault/vaults", "location": "eastus"}]
         live = [{"name": "kv1", "type": "Microsoft.KeyVault/vaults", "location": "westus2"}]
         with mock.patch.object(dd, "_list_live_resources", return_value=live):
@@ -319,7 +322,8 @@ class TestDriftDetector:
         assert "location" in findings[0].details
 
     def test_snapshot_state(self) -> None:
-        dd = DriftDetector("rg-test")
+        with mock.patch("orchestrator.reliability.drift_detector.AzureSDKClient"):
+            dd = DriftDetector("rg-test", "sub-123")
         live = [
             {"name": "r1", "type": "Microsoft.Storage/storageAccounts", "location": "eastus"},
             {"name": "r2", "type": "Microsoft.KeyVault/vaults", "location": "eastus"},
@@ -369,18 +373,22 @@ class TestDriftDetector:
 class TestHealthMonitor:
     @pytest.fixture()
     def hm(self) -> HealthMonitor:
-        return HealthMonitor("rg-test", "dev")
+        with mock.patch("orchestrator.reliability.health_monitor.AzureSDKClient"):
+            return HealthMonitor("rg-test", "dev", "sub-123")
 
     def test_sla_target_dev(self) -> None:
-        hm = HealthMonitor("rg-test", "dev")
+        with mock.patch("orchestrator.reliability.health_monitor.AzureSDKClient"):
+            hm = HealthMonitor("rg-test", "dev", "sub-123")
         assert hm.sla_target == 99.0
 
     def test_sla_target_staging(self) -> None:
-        hm = HealthMonitor("rg-test", "staging")
+        with mock.patch("orchestrator.reliability.health_monitor.AzureSDKClient"):
+            hm = HealthMonitor("rg-test", "staging", "sub-123")
         assert hm.sla_target == 99.5
 
     def test_sla_target_prod(self) -> None:
-        hm = HealthMonitor("rg-test", "prod")
+        with mock.patch("orchestrator.reliability.health_monitor.AzureSDKClient"):
+            hm = HealthMonitor("rg-test", "prod", "sub-123")
         assert hm.sla_target == 99.9
 
     def test_aggregate_status_all_healthy(self) -> None:
@@ -439,14 +447,24 @@ class TestHealthMonitor:
         h = ResourceHealth("r1", "t1", HealthStatus.UNHEALTHY, provisioning_state="Failed")
         assert h.is_healthy() is False
 
-    def test_check_resource_succeeded(self, hm: HealthMonitor) -> None:
-        res = {"name": "kv1", "type": "Microsoft.KeyVault/vaults", "provisioningState": "Succeeded", "id": ""}
-        h = hm._check_resource(res)
+    def test_get_resource_health_succeeded(self, hm: HealthMonitor) -> None:
+        from orchestrator.integration.azure_sdk_client import ResourceState, ProvisioningState
+        hm._client.get_resource.return_value = ResourceState(
+            name="kv1", resource_type="Microsoft.KeyVault/vaults",
+            location="eastus", provisioning_state=ProvisioningState.SUCCEEDED,
+        )
+        h = hm.get_resource_health("kv1")
+        assert h is not None
         assert h.status == HealthStatus.HEALTHY
 
-    def test_check_resource_failed(self, hm: HealthMonitor) -> None:
-        res = {"name": "sb1", "type": "Microsoft.ServiceBus/namespaces", "provisioningState": "Failed", "id": ""}
-        h = hm._check_resource(res)
+    def test_get_resource_health_failed(self, hm: HealthMonitor) -> None:
+        from orchestrator.integration.azure_sdk_client import ResourceState, ProvisioningState
+        hm._client.get_resource.return_value = ResourceState(
+            name="sb1", resource_type="Microsoft.ServiceBus/namespaces",
+            location="eastus", provisioning_state=ProvisioningState.FAILED,
+        )
+        h = hm.get_resource_health("sb1")
+        assert h is not None
         assert h.status == HealthStatus.UNHEALTHY
 
 
