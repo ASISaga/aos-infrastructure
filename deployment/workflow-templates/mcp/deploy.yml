@@ -15,7 +15,16 @@
 #        mcp-reddit-dev        mcp-reddit-staging        mcp-reddit-prod
 #        mcp-subconscious-dev  mcp-subconscious-staging  mcp-subconscious-prod
 #   3. For each environment, add:
-#        AZURE_CLIENT_ID     — output of: az identity show --resource-group rg-aos-<env> --name id-<APP_NAME>-<env> --query clientId -o tsv
+#        AZURE_CLIENT_ID     — Managed identity client ID for that specific MCP Function App.
+#                              Retrieve from Key Vault after infrastructure provisioning:
+#                                az login
+#                                az keyvault secret show \
+#                                  --vault-name "<kv-name>" \
+#                                  --name "clientid-<APP_NAME>-<env>" \
+#                                  --query value -o tsv
+#                              The Key Vault name is shown in the infrastructure deploy run summary.
+#                              On the first run, the infra_provisioned repository_dispatch event
+#                              triggers this workflow automatically with client IDs in the payload.
 #        AZURE_TENANT_ID     — Azure AD tenant ID
 #        AZURE_SUBSCRIPTION_ID — Azure subscription ID
 #   4. Optionally add variable AZURE_RESOURCE_GROUP (defaults to rg-aos-<env>)
@@ -42,6 +51,13 @@ on:
           - staging
           - prod
         default: dev
+  # Triggered automatically by ASISaga/aos-infrastructure after successful
+  # Function App provisioning (Bicep Phase 4).  The payload includes the
+  # environment name and Key Vault URL so that this workflow can retrieve
+  # AZURE_CLIENT_ID values without any manual secret setup.
+  repository_dispatch:
+    types:
+      - infra_provisioned
 
 permissions:
   id-token: write
@@ -57,16 +73,23 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       deploy_env: ${{ steps.env.outputs.deploy_env }}
+      key_vault_url: ${{ steps.env.outputs.key_vault_url }}
     steps:
       - name: Resolve deploy env
         id: env
         run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+          if [[ "${{ github.event_name }}" == "repository_dispatch" ]]; then
+            echo "deploy_env=${{ github.event.client_payload.environment }}" >> "$GITHUB_OUTPUT"
+            echo "key_vault_url=${{ github.event.client_payload.key_vault_url }}" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             echo "deploy_env=${{ inputs.environment }}" >> "$GITHUB_OUTPUT"
+            echo "key_vault_url=" >> "$GITHUB_OUTPUT"
           elif [[ "${{ github.event_name }}" == "release" ]]; then
             echo "deploy_env=prod" >> "$GITHUB_OUTPUT"
+            echo "key_vault_url=" >> "$GITHUB_OUTPUT"
           else
             echo "deploy_env=dev" >> "$GITHUB_OUTPUT"
+            echo "key_vault_url=" >> "$GITHUB_OUTPUT"
           fi
 
   # ---------------------------------------------------------------------------
@@ -95,10 +118,37 @@ jobs:
             pip install --target=".python_packages/lib/site-packages" -r requirements.txt
           fi
 
+      - name: Retrieve AZURE_CLIENT_ID from Key Vault
+        id: kv_client_id
+        if: needs.set-environment.outputs.key_vault_url != ''
+        run: |
+          KV_URL="${ needs.set-environment.outputs.key_vault_url }"
+          ENV="${ needs.set-environment.outputs.deploy_env }"
+          SECRET_NAME="clientid-mcp-erpnext-${{ENV}}"
+
+          # Bootstrap login with GitHub environment secret to access Key Vault.
+          az login --service-principal \
+            --username "${{ secrets.AZURE_CLIENT_ID }}" \
+            --federated-token "$(curl -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api://AzureADTokenExchange" | python3 -c "import sys,json; print(json.load(sys.stdin)['value'])")" \
+            --tenant "${{ secrets.AZURE_TENANT_ID }}" 2>/dev/null || true
+
+          CLIENT_ID=$(az keyvault secret show \
+            --vault-name "$(echo "$KV_URL" | sed 's|https://||; s|\.vault\.azure\.net.*||')" \
+            --name "$SECRET_NAME" \
+            --query value -o tsv 2>/dev/null || echo "")
+
+          if [[ -n "$CLIENT_ID" ]]; then
+            echo "client_id=${{CLIENT_ID}}" >> "$GITHUB_OUTPUT"
+            echo "  ✅ Retrieved AZURE_CLIENT_ID from Key Vault (secret: ${{SECRET_NAME}})"
+          else
+            echo "client_id=${{ secrets.AZURE_CLIENT_ID }}" >> "$GITHUB_OUTPUT"
+            echo "  ⚠️  Secret not found in Key Vault; falling back to GitHub environment secret"
+          fi
+
       - name: Azure Login (OIDC)
         uses: azure/login@v2
         with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          client-id: ${{ steps.kv_client_id.outputs.client_id || secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
@@ -155,10 +205,37 @@ jobs:
             pip install --target=".python_packages/lib/site-packages" -r requirements.txt
           fi
 
+      - name: Retrieve AZURE_CLIENT_ID from Key Vault
+        id: kv_client_id
+        if: needs.set-environment.outputs.key_vault_url != ''
+        run: |
+          KV_URL="${ needs.set-environment.outputs.key_vault_url }"
+          ENV="${ needs.set-environment.outputs.deploy_env }"
+          SECRET_NAME="clientid-mcp-linkedin-${{ENV}}"
+
+          # Bootstrap login with GitHub environment secret to access Key Vault.
+          az login --service-principal \
+            --username "${{ secrets.AZURE_CLIENT_ID }}" \
+            --federated-token "$(curl -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api://AzureADTokenExchange" | python3 -c "import sys,json; print(json.load(sys.stdin)['value'])")" \
+            --tenant "${{ secrets.AZURE_TENANT_ID }}" 2>/dev/null || true
+
+          CLIENT_ID=$(az keyvault secret show \
+            --vault-name "$(echo "$KV_URL" | sed 's|https://||; s|\.vault\.azure\.net.*||')" \
+            --name "$SECRET_NAME" \
+            --query value -o tsv 2>/dev/null || echo "")
+
+          if [[ -n "$CLIENT_ID" ]]; then
+            echo "client_id=${{CLIENT_ID}}" >> "$GITHUB_OUTPUT"
+            echo "  ✅ Retrieved AZURE_CLIENT_ID from Key Vault (secret: ${{SECRET_NAME}})"
+          else
+            echo "client_id=${{ secrets.AZURE_CLIENT_ID }}" >> "$GITHUB_OUTPUT"
+            echo "  ⚠️  Secret not found in Key Vault; falling back to GitHub environment secret"
+          fi
+
       - name: Azure Login (OIDC)
         uses: azure/login@v2
         with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          client-id: ${{ steps.kv_client_id.outputs.client_id || secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
@@ -215,10 +292,37 @@ jobs:
             pip install --target=".python_packages/lib/site-packages" -r requirements.txt
           fi
 
+      - name: Retrieve AZURE_CLIENT_ID from Key Vault
+        id: kv_client_id
+        if: needs.set-environment.outputs.key_vault_url != ''
+        run: |
+          KV_URL="${ needs.set-environment.outputs.key_vault_url }"
+          ENV="${ needs.set-environment.outputs.deploy_env }"
+          SECRET_NAME="clientid-mcp-reddit-${{ENV}}"
+
+          # Bootstrap login with GitHub environment secret to access Key Vault.
+          az login --service-principal \
+            --username "${{ secrets.AZURE_CLIENT_ID }}" \
+            --federated-token "$(curl -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api://AzureADTokenExchange" | python3 -c "import sys,json; print(json.load(sys.stdin)['value'])")" \
+            --tenant "${{ secrets.AZURE_TENANT_ID }}" 2>/dev/null || true
+
+          CLIENT_ID=$(az keyvault secret show \
+            --vault-name "$(echo "$KV_URL" | sed 's|https://||; s|\.vault\.azure\.net.*||')" \
+            --name "$SECRET_NAME" \
+            --query value -o tsv 2>/dev/null || echo "")
+
+          if [[ -n "$CLIENT_ID" ]]; then
+            echo "client_id=${{CLIENT_ID}}" >> "$GITHUB_OUTPUT"
+            echo "  ✅ Retrieved AZURE_CLIENT_ID from Key Vault (secret: ${{SECRET_NAME}})"
+          else
+            echo "client_id=${{ secrets.AZURE_CLIENT_ID }}" >> "$GITHUB_OUTPUT"
+            echo "  ⚠️  Secret not found in Key Vault; falling back to GitHub environment secret"
+          fi
+
       - name: Azure Login (OIDC)
         uses: azure/login@v2
         with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          client-id: ${{ steps.kv_client_id.outputs.client_id || secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
@@ -275,10 +379,37 @@ jobs:
             pip install --target=".python_packages/lib/site-packages" -r requirements.txt
           fi
 
+      - name: Retrieve AZURE_CLIENT_ID from Key Vault
+        id: kv_client_id
+        if: needs.set-environment.outputs.key_vault_url != ''
+        run: |
+          KV_URL="${ needs.set-environment.outputs.key_vault_url }"
+          ENV="${ needs.set-environment.outputs.deploy_env }"
+          SECRET_NAME="clientid-mcp-subconscious-${{ENV}}"
+
+          # Bootstrap login with GitHub environment secret to access Key Vault.
+          az login --service-principal \
+            --username "${{ secrets.AZURE_CLIENT_ID }}" \
+            --federated-token "$(curl -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api://AzureADTokenExchange" | python3 -c "import sys,json; print(json.load(sys.stdin)['value'])")" \
+            --tenant "${{ secrets.AZURE_TENANT_ID }}" 2>/dev/null || true
+
+          CLIENT_ID=$(az keyvault secret show \
+            --vault-name "$(echo "$KV_URL" | sed 's|https://||; s|\.vault\.azure\.net.*||')" \
+            --name "$SECRET_NAME" \
+            --query value -o tsv 2>/dev/null || echo "")
+
+          if [[ -n "$CLIENT_ID" ]]; then
+            echo "client_id=${{CLIENT_ID}}" >> "$GITHUB_OUTPUT"
+            echo "  ✅ Retrieved AZURE_CLIENT_ID from Key Vault (secret: ${{SECRET_NAME}})"
+          else
+            echo "client_id=${{ secrets.AZURE_CLIENT_ID }}" >> "$GITHUB_OUTPUT"
+            echo "  ⚠️  Secret not found in Key Vault; falling back to GitHub environment secret"
+          fi
+
       - name: Azure Login (OIDC)
         uses: azure/login@v2
         with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          client-id: ${{ steps.kv_client_id.outputs.client_id || secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 

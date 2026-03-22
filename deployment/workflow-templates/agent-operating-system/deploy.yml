@@ -4,9 +4,20 @@
 #
 # Prerequisites — run once from ASISaga/aos-infrastructure:
 #   1. Deploy infrastructure:  workflow_dispatch on infrastructure-deploy.yml
+#      The Bicep templates create the Function App and its User-Assigned Managed
+#      Identity, then store the identity clientId in Key Vault automatically.
 #   2. Create GitHub Environments in THIS repo: dev, staging, prod
 #   3. Add the following secrets to each environment:
-#        AZURE_CLIENT_ID     — output of: az identity show --resource-group rg-aos-<env> --name id-agent-operating-system-<env> --query clientId -o tsv
+#        AZURE_CLIENT_ID     — Managed identity client ID.
+#                              Retrieve from Key Vault after infrastructure provisioning:
+#                                az login
+#                                az keyvault secret show \
+#                                  --vault-name "<kv-name>" \
+#                                  --name "clientid-agent-operating-system-<env>" \
+#                                  --query value -o tsv
+#                              The Key Vault name is shown in the infrastructure deploy run summary.
+#                              On the first run, the infra_provisioned repository_dispatch event
+#                              triggers this workflow automatically with the client ID in the payload.
 #        AZURE_TENANT_ID     — Azure AD tenant ID
 #        AZURE_SUBSCRIPTION_ID — Azure subscription ID
 #   4. Optionally add variable AZURE_RESOURCE_GROUP (defaults to rg-aos-<env>)
@@ -33,6 +44,13 @@ on:
           - staging
           - prod
         default: dev
+  # Triggered automatically by ASISaga/aos-infrastructure after successful
+  # Function App provisioning (Bicep Phase 4).  The payload includes the
+  # environment name and Key Vault URL so that this workflow can retrieve
+  # AZURE_CLIENT_ID without any manual secret setup.
+  repository_dispatch:
+    types:
+      - infra_provisioned
 
 permissions:
   id-token: write
@@ -45,9 +63,9 @@ env:
 
 jobs:
   deploy:
-    name: Deploy (${{ github.event_name == 'workflow_dispatch' && inputs.environment || (github.event_name == 'release' && 'prod' || 'dev') }})
+    name: Deploy (${{ github.event_name == 'repository_dispatch' && github.event.client_payload.environment || github.event_name == 'workflow_dispatch' && inputs.environment || (github.event_name == 'release' && 'prod' || 'dev') }})
     runs-on: ubuntu-latest
-    environment: ${{ github.event_name == 'workflow_dispatch' && inputs.environment || (github.event_name == 'release' && 'prod' || 'dev') }}
+    environment: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.environment || github.event_name == 'workflow_dispatch' && inputs.environment || (github.event_name == 'release' && 'prod' || 'dev') }}
 
     steps:
       - name: Checkout
@@ -66,17 +84,69 @@ jobs:
             pip install --target=".python_packages/lib/site-packages" -r requirements.txt
           fi
 
+      - name: Resolve Azure credentials
+        id: azure_creds
+        run: |
+          # When triggered by repository_dispatch (infra_provisioned), the infra
+          # pipeline stores the client ID in Key Vault and includes it in the event
+          # payload.  For all other triggers, fall back to the GitHub environment secret.
+          if [[ "${{ github.event_name }}" == "repository_dispatch" ]]; then
+            KV_URL="${{ github.event.client_payload.key_vault_url }}"
+            ENV="${{ github.event.client_payload.environment }}"
+            if [[ -n "$KV_URL" ]]; then
+              echo "  ℹ️  Retrieving AZURE_CLIENT_ID from Key Vault: ${KV_URL}"
+              echo "key_vault_url=${KV_URL}" >> "$GITHUB_OUTPUT"
+              echo "use_keyvault=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "use_keyvault=false" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "use_keyvault=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Azure Login (OIDC) — using Key Vault client ID
+        if: steps.azure_creds.outputs.use_keyvault == 'true'
+        uses: azure/login@v2
+        with:
+          # Use a bootstrap credential to read from Key Vault, then re-login
+          # with the app-specific identity retrieved from Key Vault.
+          # The infra pipeline grants the deployment identity Key Vault Reader.
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Retrieve AZURE_CLIENT_ID from Key Vault
+        id: kv_client_id
+        if: steps.azure_creds.outputs.use_keyvault == 'true'
+        run: |
+          KV_URL="${{ steps.azure_creds.outputs.key_vault_url }}"
+          ENV="${{ github.event.client_payload.environment }}"
+          SECRET_NAME="clientid-${{ env.APP_NAME }}-${ENV}"
+
+          CLIENT_ID=$(az keyvault secret show \
+            --vault-name "$(echo "$KV_URL" | sed 's|https://||; s|\.vault\.azure\.net.*||')" \
+            --name "$SECRET_NAME" \
+            --query value -o tsv 2>/dev/null || echo "")
+
+          if [[ -n "$CLIENT_ID" ]]; then
+            echo "client_id=${CLIENT_ID}" >> "$GITHUB_OUTPUT"
+            echo "  ✅ Retrieved AZURE_CLIENT_ID from Key Vault (secret: ${SECRET_NAME})"
+          else
+            echo "client_id=${{ secrets.AZURE_CLIENT_ID }}" >> "$GITHUB_OUTPUT"
+            echo "  ⚠️  Secret not found in Key Vault; falling back to GitHub environment secret"
+          fi
+
       - name: Azure Login (OIDC)
         uses: azure/login@v2
         with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          client-id: ${{ steps.kv_client_id.outputs.client_id || secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: Resolve Function App name
         id: resolve
         env:
-          DEPLOY_ENV: ${{ github.event_name == 'workflow_dispatch' && inputs.environment || (github.event_name == 'release' && 'prod' || 'dev') }}
+          DEPLOY_ENV: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.environment || github.event_name == 'workflow_dispatch' && inputs.environment || (github.event_name == 'release' && 'prod' || 'dev') }}
         run: |
           RESOURCE_GROUP="${{ vars.AZURE_RESOURCE_GROUP || format('rg-aos-{0}', env.DEPLOY_ENV) }}"
           PREFIX="func-${{ env.APP_NAME }}-${DEPLOY_ENV}-"
