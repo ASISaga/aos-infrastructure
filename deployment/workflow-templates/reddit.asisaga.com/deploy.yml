@@ -1,0 +1,105 @@
+# Deploy workflow for ASISaga/reddit.asisaga.com
+#
+# Copy this file to .github/workflows/deploy.yml in the reddit.asisaga.com repository.
+#
+# Prerequisites — run once from ASISaga/aos-infrastructure:
+#   1. Deploy infrastructure:  workflow_dispatch on infrastructure-deploy.yml
+#   2. Create GitHub Environments in THIS repo: dev, staging, prod
+#   3. Add the following secrets to each environment:
+#        AZURE_CLIENT_ID     — output of: az identity show --resource-group rg-aos-<env> --name id-mcp-reddit-<env> --query clientId -o tsv
+#        AZURE_TENANT_ID     — Azure AD tenant ID
+#        AZURE_SUBSCRIPTION_ID — Azure subscription ID
+#   4. Optionally add variable AZURE_RESOURCE_GROUP (defaults to rg-aos-<env>)
+#
+# See deployment/workflow-templates/README.md in ASISaga/aos-infrastructure for full setup guide.
+
+name: Deploy to Azure
+
+on:
+  push:
+    branches:
+      - main
+  release:
+    types:
+      - published
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+        default: dev
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  PYTHON_VERSION: '3.11'
+  # Azure-safe application name — must match the appName in the mcpServerApps array in deployment/phases/04-function-apps.bicep
+  APP_NAME: 'mcp-reddit'
+
+jobs:
+  deploy:
+    name: Deploy (${{ github.event_name == 'workflow_dispatch' && inputs.environment || (github.event_name == 'release' && 'prod' || 'dev') }})
+    runs-on: ubuntu-latest
+    environment: ${{ github.event_name == 'workflow_dispatch' && inputs.environment || (github.event_name == 'release' && 'prod' || 'dev') }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          if [[ -f requirements.txt ]]; then
+            pip install --target=".python_packages/lib/site-packages" -r requirements.txt
+          fi
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Resolve Function App name
+        id: resolve
+        env:
+          DEPLOY_ENV: ${{ github.event_name == 'workflow_dispatch' && inputs.environment || (github.event_name == 'release' && 'prod' || 'dev') }}
+        run: |
+          RESOURCE_GROUP="${{ vars.AZURE_RESOURCE_GROUP || format('rg-aos-{0}', env.DEPLOY_ENV) }}"
+          PREFIX="func-${{ env.APP_NAME }}-${DEPLOY_ENV}-"
+
+          FUNCTION_APP=$(az functionapp list \
+            --resource-group "$RESOURCE_GROUP" \
+            --query "[?starts_with(name, '${PREFIX}')].name | [0]" \
+            --output tsv 2>/dev/null)
+
+          if [[ -z "$FUNCTION_APP" ]]; then
+            echo "❌ No Function App found with prefix '${PREFIX}' in resource group '${RESOURCE_GROUP}'"
+            echo "   Run the infrastructure deployment from ASISaga/aos-infrastructure first."
+            exit 1
+          fi
+
+          echo "function_app=${FUNCTION_APP}" >> "$GITHUB_OUTPUT"
+          echo "resource_group=${RESOURCE_GROUP}" >> "$GITHUB_OUTPUT"
+          echo "✅ Deploying to Function App: ${FUNCTION_APP} (resource group: ${RESOURCE_GROUP})"
+
+      - name: Deploy to Azure Function App
+        uses: azure/functions-action@v1
+        with:
+          app-name: ${{ steps.resolve.outputs.function_app }}
+          package: .
+          respect-funcignore: true
+          scm-do-build-during-deployment: false

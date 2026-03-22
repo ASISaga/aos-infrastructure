@@ -1,0 +1,310 @@
+# Deploy workflow for ASISaga/mcp
+#
+# Copy this file to .github/workflows/deploy.yml in the mcp repository.
+#
+# This workflow deploys the mcp monorepo to all four MCP server Function Apps in parallel.
+# Each Function App has its own User-Assigned Managed Identity; the mcp repo needs a
+# separate GitHub Environment (with its own AZURE_CLIENT_ID secret) for each.
+#
+# Prerequisites — run once from ASISaga/aos-infrastructure:
+#   1. Deploy infrastructure:  workflow_dispatch on infrastructure-deploy.yml
+#      (The Bicep adds a federated credential for ASISaga/mcp to each MCP Function App automatically.)
+#   2. Create 12 GitHub Environments in THIS repo (4 apps × 3 envs):
+#        mcp-erpnext-dev       mcp-erpnext-staging       mcp-erpnext-prod
+#        mcp-linkedin-dev      mcp-linkedin-staging      mcp-linkedin-prod
+#        mcp-reddit-dev        mcp-reddit-staging        mcp-reddit-prod
+#        mcp-subconscious-dev  mcp-subconscious-staging  mcp-subconscious-prod
+#   3. For each environment, add:
+#        AZURE_CLIENT_ID     — output of: az identity show --resource-group rg-aos-<env> --name id-<APP_NAME>-<env> --query clientId -o tsv
+#        AZURE_TENANT_ID     — Azure AD tenant ID
+#        AZURE_SUBSCRIPTION_ID — Azure subscription ID
+#   4. Optionally add variable AZURE_RESOURCE_GROUP (defaults to rg-aos-<env>)
+#
+# See deployment/workflow-templates/README.md in ASISaga/aos-infrastructure for full setup guide.
+
+name: Deploy to Azure
+
+on:
+  push:
+    branches:
+      - main
+  release:
+    types:
+      - published
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+        default: dev
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  PYTHON_VERSION: '3.11'
+
+# Determine the target deployment environment once and pass it to each job via needs.
+jobs:
+  set-environment:
+    name: Resolve environment
+    runs-on: ubuntu-latest
+    outputs:
+      deploy_env: ${{ steps.env.outputs.deploy_env }}
+    steps:
+      - name: Resolve deploy env
+        id: env
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "deploy_env=${{ inputs.environment }}" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ github.event_name }}" == "release" ]]; then
+            echo "deploy_env=prod" >> "$GITHUB_OUTPUT"
+          else
+            echo "deploy_env=dev" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ---------------------------------------------------------------------------
+  # Deploy mcp-erpnext
+  # ---------------------------------------------------------------------------
+  deploy-erpnext:
+    name: mcp-erpnext (${{ needs.set-environment.outputs.deploy_env }})
+    needs: set-environment
+    runs-on: ubuntu-latest
+    environment: mcp-erpnext-${{ needs.set-environment.outputs.deploy_env }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          if [[ -f requirements.txt ]]; then
+            pip install --target=".python_packages/lib/site-packages" -r requirements.txt
+          fi
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Resolve Function App name
+        id: resolve
+        env:
+          DEPLOY_ENV: ${{ needs.set-environment.outputs.deploy_env }}
+          APP_NAME: mcp-erpnext
+        run: |
+          RESOURCE_GROUP="${{ vars.AZURE_RESOURCE_GROUP || format('rg-aos-{0}', env.DEPLOY_ENV) }}"
+          PREFIX="func-${APP_NAME}-${DEPLOY_ENV}-"
+          FUNCTION_APP=$(az functionapp list \
+            --resource-group "$RESOURCE_GROUP" \
+            --query "[?starts_with(name, '${PREFIX}')].name | [0]" \
+            --output tsv 2>/dev/null)
+          if [[ -z "$FUNCTION_APP" ]]; then
+            echo "❌ No Function App found with prefix '${PREFIX}' in resource group '${RESOURCE_GROUP}'"
+            exit 1
+          fi
+          echo "function_app=${FUNCTION_APP}" >> "$GITHUB_OUTPUT"
+          echo "✅ Deploying to Function App: ${FUNCTION_APP}"
+
+      - name: Deploy to Azure Function App
+        uses: azure/functions-action@v1
+        with:
+          app-name: ${{ steps.resolve.outputs.function_app }}
+          package: .
+          respect-funcignore: true
+          scm-do-build-during-deployment: false
+
+  # ---------------------------------------------------------------------------
+  # Deploy mcp-linkedin
+  # ---------------------------------------------------------------------------
+  deploy-linkedin:
+    name: mcp-linkedin (${{ needs.set-environment.outputs.deploy_env }})
+    needs: set-environment
+    runs-on: ubuntu-latest
+    environment: mcp-linkedin-${{ needs.set-environment.outputs.deploy_env }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          if [[ -f requirements.txt ]]; then
+            pip install --target=".python_packages/lib/site-packages" -r requirements.txt
+          fi
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Resolve Function App name
+        id: resolve
+        env:
+          DEPLOY_ENV: ${{ needs.set-environment.outputs.deploy_env }}
+          APP_NAME: mcp-linkedin
+        run: |
+          RESOURCE_GROUP="${{ vars.AZURE_RESOURCE_GROUP || format('rg-aos-{0}', env.DEPLOY_ENV) }}"
+          PREFIX="func-${APP_NAME}-${DEPLOY_ENV}-"
+          FUNCTION_APP=$(az functionapp list \
+            --resource-group "$RESOURCE_GROUP" \
+            --query "[?starts_with(name, '${PREFIX}')].name | [0]" \
+            --output tsv 2>/dev/null)
+          if [[ -z "$FUNCTION_APP" ]]; then
+            echo "❌ No Function App found with prefix '${PREFIX}' in resource group '${RESOURCE_GROUP}'"
+            exit 1
+          fi
+          echo "function_app=${FUNCTION_APP}" >> "$GITHUB_OUTPUT"
+          echo "✅ Deploying to Function App: ${FUNCTION_APP}"
+
+      - name: Deploy to Azure Function App
+        uses: azure/functions-action@v1
+        with:
+          app-name: ${{ steps.resolve.outputs.function_app }}
+          package: .
+          respect-funcignore: true
+          scm-do-build-during-deployment: false
+
+  # ---------------------------------------------------------------------------
+  # Deploy mcp-reddit
+  # ---------------------------------------------------------------------------
+  deploy-reddit:
+    name: mcp-reddit (${{ needs.set-environment.outputs.deploy_env }})
+    needs: set-environment
+    runs-on: ubuntu-latest
+    environment: mcp-reddit-${{ needs.set-environment.outputs.deploy_env }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          if [[ -f requirements.txt ]]; then
+            pip install --target=".python_packages/lib/site-packages" -r requirements.txt
+          fi
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Resolve Function App name
+        id: resolve
+        env:
+          DEPLOY_ENV: ${{ needs.set-environment.outputs.deploy_env }}
+          APP_NAME: mcp-reddit
+        run: |
+          RESOURCE_GROUP="${{ vars.AZURE_RESOURCE_GROUP || format('rg-aos-{0}', env.DEPLOY_ENV) }}"
+          PREFIX="func-${APP_NAME}-${DEPLOY_ENV}-"
+          FUNCTION_APP=$(az functionapp list \
+            --resource-group "$RESOURCE_GROUP" \
+            --query "[?starts_with(name, '${PREFIX}')].name | [0]" \
+            --output tsv 2>/dev/null)
+          if [[ -z "$FUNCTION_APP" ]]; then
+            echo "❌ No Function App found with prefix '${PREFIX}' in resource group '${RESOURCE_GROUP}'"
+            exit 1
+          fi
+          echo "function_app=${FUNCTION_APP}" >> "$GITHUB_OUTPUT"
+          echo "✅ Deploying to Function App: ${FUNCTION_APP}"
+
+      - name: Deploy to Azure Function App
+        uses: azure/functions-action@v1
+        with:
+          app-name: ${{ steps.resolve.outputs.function_app }}
+          package: .
+          respect-funcignore: true
+          scm-do-build-during-deployment: false
+
+  # ---------------------------------------------------------------------------
+  # Deploy mcp-subconscious
+  # ---------------------------------------------------------------------------
+  deploy-subconscious:
+    name: mcp-subconscious (${{ needs.set-environment.outputs.deploy_env }})
+    needs: set-environment
+    runs-on: ubuntu-latest
+    environment: mcp-subconscious-${{ needs.set-environment.outputs.deploy_env }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          if [[ -f requirements.txt ]]; then
+            pip install --target=".python_packages/lib/site-packages" -r requirements.txt
+          fi
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Resolve Function App name
+        id: resolve
+        env:
+          DEPLOY_ENV: ${{ needs.set-environment.outputs.deploy_env }}
+          APP_NAME: mcp-subconscious
+        run: |
+          RESOURCE_GROUP="${{ vars.AZURE_RESOURCE_GROUP || format('rg-aos-{0}', env.DEPLOY_ENV) }}"
+          PREFIX="func-${APP_NAME}-${DEPLOY_ENV}-"
+          FUNCTION_APP=$(az functionapp list \
+            --resource-group "$RESOURCE_GROUP" \
+            --query "[?starts_with(name, '${PREFIX}')].name | [0]" \
+            --output tsv 2>/dev/null)
+          if [[ -z "$FUNCTION_APP" ]]; then
+            echo "❌ No Function App found with prefix '${PREFIX}' in resource group '${RESOURCE_GROUP}'"
+            exit 1
+          fi
+          echo "function_app=${FUNCTION_APP}" >> "$GITHUB_OUTPUT"
+          echo "✅ Deploying to Function App: ${FUNCTION_APP}"
+
+      - name: Deploy to Azure Function App
+        uses: azure/functions-action@v1
+        with:
+          app-name: ${{ steps.resolve.outputs.function_app }}
+          package: .
+          respect-funcignore: true
+          scm-do-build-during-deployment: false
