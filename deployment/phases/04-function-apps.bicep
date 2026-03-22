@@ -120,6 +120,8 @@ module functionApps '../modules/functionapp.bicep' = [for appName in appNames: {
 }]
 
 // One dedicated FC1 Flex Consumption plan + Function App per MCP server submodule.
+// additionalGithubRepo 'mcp' allows the ASISaga/mcp monorepo to also deploy to each server's
+// Function App using its own OIDC token, in addition to the primary domain repo.
 module mcpServerFunctionApps '../modules/functionapp.bicep' = [for mcpApp in mcpServerApps: {
   name: 'functionapp-${mcpApp.appName}-${suffix}'
   params: {
@@ -127,6 +129,7 @@ module mcpServerFunctionApps '../modules/functionapp.bicep' = [for mcpApp in mcp
     environment: environment
     appName: mcpApp.appName
     githubRepo: mcpApp.githubRepo
+    additionalGithubRepo: 'mcp'
     uniqueSuffix: uniqueSuffix
     tags: tags
     storageAccountName: existingStorage.name

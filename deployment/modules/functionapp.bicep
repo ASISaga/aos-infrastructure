@@ -66,6 +66,9 @@ param githubEnvironment string = environment
 @description('GitHub repository name for the OIDC Workload Identity Federation subject. Defaults to appName when the repo name matches the app name. Override when the GitHub repo name differs from appName (e.g. MCP servers whose repo names contain dots).')
 param githubRepo string = appName
 
+@description('Optional additional GitHub repository that is also permitted to deploy to this Function App via OIDC Workload Identity Federation. Used when a monorepo (e.g. ASISaga/mcp) owns the implementation for an app whose primary OIDC subject is tied to a domain-named repo. Leave empty to allow only the primary githubRepo.')
+param additionalGithubRepo string = ''
+
 @description('Custom domain hostname to bind to this Function App and secure with a free App Service Managed Certificate (e.g. erpnext.asisaga.com or aos-dispatcher.asisaga.com). Requires a DNS CNAME record pointing this domain to the app\'s default azurewebsites.net hostname before deployment — deployment will fail at the hostname binding step if the CNAME is absent. Leave empty to skip custom domain setup entirely.')
 param customDomain string = ''
 
@@ -114,6 +117,21 @@ resource federatedCredential 'Microsoft.ManagedIdentity/userAssignedIdentities/f
   properties: {
     issuer: 'https://token.actions.githubusercontent.com'
     subject: 'repo:${githubOrg}/${githubRepo}:environment:${githubEnvironment}'
+    audiences: [
+      'api://AzureADTokenExchange'
+    ]
+  }
+}
+
+// Optional additional Workload Identity Federation — allows a second GitHub repository (e.g. a monorepo)
+// to also exchange OIDC tokens for Azure credentials for this app's managed identity.
+// The identity and RBAC scope remain the same; only the allowed OIDC issuer subject is broadened.
+resource additionalFederatedCredential 'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials@2023-01-31' = if (!empty(additionalGithubRepo)) {
+  parent: userAssignedIdentity
+  name: 'github-${appName}-${environment}-${additionalGithubRepo}'
+  properties: {
+    issuer: 'https://token.actions.githubusercontent.com'
+    subject: 'repo:${githubOrg}/${additionalGithubRepo}:environment:${githubEnvironment}'
     audiences: [
       'api://AzureADTokenExchange'
     ]
