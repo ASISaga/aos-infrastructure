@@ -30,34 +30,34 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def _credential():  # noqa: ANN202
+def _credential() -> "DefaultAzureCredential":
+    """Create a DefaultAzureCredential instance."""
     from azure.identity import DefaultAzureCredential
     return DefaultAzureCredential()
 
 
-def _resource_client(subscription_id: str):  # noqa: ANN202
+def _resource_client(subscription_id: str) -> "ResourceManagementClient":
+    """Create a ResourceManagementClient instance."""
     from azure.mgmt.resource import ResourceManagementClient
     return ResourceManagementClient(_credential(), subscription_id)
 
 
-def _web_client(subscription_id: str):  # noqa: ANN202
+def _web_client(subscription_id: str) -> "WebSiteManagementClient":
+    """Create a WebSiteManagementClient instance."""
     from azure.mgmt.web import WebSiteManagementClient
     return WebSiteManagementClient(_credential(), subscription_id)
 
 
-def _monitor_client(subscription_id: str):  # noqa: ANN202
+def _monitor_client(subscription_id: str) -> "MonitorManagementClient":
+    """Create a MonitorManagementClient instance."""
     from azure.mgmt.monitor import MonitorManagementClient
     return MonitorManagementClient(_credential(), subscription_id)
 
 
-def _servicebus_client(subscription_id: str):  # noqa: ANN202
+def _servicebus_client(subscription_id: str) -> "ServiceBusManagementClient":
+    """Create a ServiceBusManagementClient instance."""
     from azure.mgmt.servicebus import ServiceBusManagementClient
     return ServiceBusManagementClient(_credential(), subscription_id)
-
-
-def _keyvault_mgmt_client(subscription_id: str):  # noqa: ANN202
-    from azure.mgmt.resource import ResourceManagementClient
-    return ResourceManagementClient(_credential(), subscription_id)
 
 
 # ---------------------------------------------------------------------------
@@ -97,11 +97,15 @@ def _list_resources(args: argparse.Namespace) -> None:
     resources = list(client.resources.list_by_resource_group(args.resource_group))
 
     if args.output == "json":
-        result = [
-            {"name": r.name, "type": r.type, "location": r.location,
-             "provisioningState": r.properties.get("provisioningState", "Unknown") if isinstance(r.properties, dict) else "Unknown"}
-            for r in resources
-        ]
+        result = []
+        for r in resources:
+            props = r.properties if isinstance(r.properties, dict) else {}
+            result.append({
+                "name": r.name,
+                "type": r.type,
+                "location": r.location,
+                "provisioningState": props.get("provisioningState", "Unknown"),
+            })
         print(json.dumps(result, indent=2))
     elif args.output == "table":
         print(f"{'Name':<40} {'Type':<50} {'Location':<15}")
@@ -344,12 +348,13 @@ def _show_resource(args: argparse.Namespace) -> None:
         print(f"Resource '{args.name}' not found in '{args.resource_group}'.", file=sys.stderr)
         sys.exit(1)
     r = matched[0]
+    props = r.properties if isinstance(r.properties, dict) else {}
     result = {
         "name": r.name,
         "type": r.type,
         "location": r.location,
         "id": r.id,
-        "provisioningState": r.properties.get("provisioningState", "Unknown") if isinstance(r.properties, dict) else "Unknown",
+        "provisioningState": props.get("provisioningState", "Unknown"),
         "tags": dict(r.tags) if r.tags else {},
     }
     print(json.dumps(result, indent=2))
