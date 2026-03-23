@@ -47,7 +47,7 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install dependencies
-        run: pip install -r deployment/orchestrator/requirements.txt
+        run: pip install -e .
 
       - name: Azure login
         uses: azure/login@v3
@@ -77,8 +77,8 @@ jobs:
         run: |
           python - <<'EOF'
           import sys, json
-          sys.path.insert(0, 'deployment/orchestrator')
-          from governance.cost_manager import CostManager
+          sys.path.insert(0, 'deployment')
+          from orchestrator.governance.cost_manager import CostManager
 
           cm = CostManager(
               '${{ steps.resolve.outputs.resource_group }}',
@@ -104,8 +104,8 @@ jobs:
         run: |
           python - <<'PYEOF'
           import sys, json, os
-          sys.path.insert(0, 'deployment/orchestrator')
-          from governance.scale_down_auditor import ScaleDownAuditor
+          sys.path.insert(0, 'deployment')
+          from orchestrator.governance.scale_down_auditor import ScaleDownAuditor
 
           auditor = ScaleDownAuditor(
               '${{ steps.resolve.outputs.resource_group }}',

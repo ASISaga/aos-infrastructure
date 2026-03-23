@@ -50,7 +50,7 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install dependencies
-        run: pip install -r deployment/orchestrator/requirements.txt
+        run: pip install -e .
 
       - name: Azure login
         id: login
@@ -82,8 +82,8 @@ jobs:
         run: |
           python - <<'EOF'
           import sys, json
-          sys.path.insert(0, 'deployment/orchestrator')
-          from reliability.drift_detector import DriftDetector
+          sys.path.insert(0, 'deployment')
+          from orchestrator.reliability.drift_detector import DriftDetector
           dd = DriftDetector('${{ steps.resolve.outputs.resource_group }}')
           snapshot = dd.snapshot_state()
           print(f"Snapshot: {len(snapshot)} resources")
@@ -95,8 +95,8 @@ jobs:
         run: |
           python - <<'EOF'
           import sys, json
-          sys.path.insert(0, 'deployment/orchestrator')
-          from reliability.drift_detector import DriftDetector, DriftKind
+          sys.path.insert(0, 'deployment')
+          from orchestrator.reliability.drift_detector import DriftDetector, DriftKind
           dd = DriftDetector('${{ steps.resolve.outputs.resource_group }}')
           template = '${{ steps.resolve.outputs.template }}'
           params = '${{ steps.resolve.outputs.parameters_file }}'
@@ -117,8 +117,8 @@ jobs:
         run: |
           python - <<'EOF'
           import sys
-          sys.path.insert(0, 'deployment/orchestrator')
-          from reliability.health_monitor import HealthMonitor
+          sys.path.insert(0, 'deployment')
+          from orchestrator.reliability.health_monitor import HealthMonitor
           hm = HealthMonitor('${{ steps.resolve.outputs.resource_group }}', '${{ steps.resolve.outputs.environment }}')
           sla = hm.check_sla_compliance()
           if not sla['compliant']:
@@ -132,8 +132,8 @@ jobs:
         run: |
           python - <<'EOF'
           import sys
-          sys.path.insert(0, 'deployment/orchestrator')
-          from reliability.health_monitor import HealthMonitor
+          sys.path.insert(0, 'deployment')
+          from orchestrator.reliability.health_monitor import HealthMonitor
           hm = HealthMonitor('${{ steps.resolve.outputs.resource_group }}', '${{ steps.resolve.outputs.environment }}')
           dr = hm.check_disaster_recovery_readiness()
           if not dr['ready']:
@@ -146,12 +146,13 @@ jobs:
         continue-on-error: true
         run: |
           RESOURCE_GROUP="${{ steps.resolve.outputs.resource_group }}"
-          FUNCTION_APPS=$(az functionapp list -g "$RESOURCE_GROUP" --query "[].name" -o tsv 2>/dev/null || echo "")
+          AZURE_OPS="python3 deployment/orchestrator/cli/azure_ops.py --subscription-id ${{ secrets.AZURE_SUBSCRIPTION_ID }}"
+          FUNCTION_APPS=$($AZURE_OPS list-function-apps --resource-group "$RESOURCE_GROUP" --output names 2>/dev/null || echo "")
 
           if [[ -n "$FUNCTION_APPS" ]]; then
             while IFS= read -r APP; do
-              SC_URL=$(az webapp deployment source show \
-                -g "$RESOURCE_GROUP" -n "$APP" --query "repoUrl" -o tsv 2>/dev/null || echo "")
+              [[ -z "$APP" ]] && continue
+              SC_URL=$($AZURE_OPS show-source-control --resource-group "$RESOURCE_GROUP" --name "$APP" 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('repoUrl',''))" 2>/dev/null || echo "")
               if [[ -z "$SC_URL" ]]; then
                 echo "::warning::Drift: Microsoft.Web/sites/sourcecontrols missing on Function App: $APP"
               else
