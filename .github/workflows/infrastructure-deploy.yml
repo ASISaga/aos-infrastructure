@@ -59,6 +59,9 @@ on:
 permissions:
   id-token: write
   contents: read
+  # Required to dispatch repository_dispatch events to code repositories
+  # (via DEPLOY_DISPATCH_TOKEN secret — a PAT with repo scope)
+  actions: write
 
 env:
   PYTHON_VERSION: '3.12'
@@ -386,6 +389,35 @@ jobs:
           set -e
           exit $EXIT_CODE
 
+      # ── Store Function App client IDs in Key Vault ────────────────────────
+      # After Phase 4 provisions the Function Apps and their User-Assigned
+      # Managed Identities, this step fetches each identity's clientId via
+      # ManagedServiceIdentityClient (azure.mgmt.msi) and stores it in the
+      # Phase 1 Key Vault as a secret named "clientid-{app}-{env}".
+      # Code repositories retrieve their own AZURE_CLIENT_ID from Key Vault
+      # via GitHub OIDC, removing the need for manual secret management.
+      - name: Store Function App client IDs in Key Vault
+        id: store_client_ids
+        if: >-
+          needs.validate.outputs.is_dry_run != 'true' &&
+          steps.deploy_bicep_function_apps.outcome == 'success'
+        continue-on-error: true
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          set +e
+          python3 deployment/deploy.py fetch-identity-client-ids \
+            --resource-group "${{ needs.validate.outputs.resource_group }}" \
+            --location "${{ steps.region_select.outputs.primary_region }}" \
+            --environment "${{ needs.validate.outputs.environment }}" \
+            --template "${{ inputs.template || 'deployment/main-modular.bicep' }}" \
+            2>&1 | tee -a orchestrator-output.log
+          EXIT_CODE=${PIPESTATUS[0]}
+          set -e
+          exit $EXIT_CODE
+
       # ── Phase 5 — Governance (policy assignments / cost budget) ─────────────
       # Independent of all other phases — always runs (resources are conditional
       # on enableGovernancePolicies and monthlyBudgetAmount template parameters).
@@ -435,7 +467,77 @@ jobs:
           fi
           echo "✅ All Bicep phases completed successfully"
 
-      # ── Pipeline step 6 — Health Check (deploy mode, unless skipped) ──────
+      # ── Signal code repositories (repository_dispatch) ────────────────────
+      # When Phase 4 (Function Apps) succeeds, dispatch an ``infra_provisioned``
+      # event to each code repository so that code deployments start
+      # automatically without manual triggering.  The payload includes the
+      # environment name and the Key Vault URL where each repo can look up its
+      # own AZURE_CLIENT_ID secret (clientid-{app_name}-{environment}).
+      #
+      # Requires: DEPLOY_DISPATCH_TOKEN secret — a GitHub PAT with `repo` scope
+      # on each target repository (or a GitHub App installation token).
+      - name: Signal code repositories (infra_provisioned)
+        id: dispatch_code_repos
+        if: >-
+          needs.validate.outputs.is_dry_run != 'true' &&
+          steps.deploy_bicep_function_apps.outcome == 'success'
+        continue-on-error: true
+        env:
+          DISPATCH_TOKEN: ${{ secrets.DEPLOY_DISPATCH_TOKEN }}
+          ENVIRONMENT: ${{ needs.validate.outputs.environment }}
+          RESOURCE_GROUP: ${{ needs.validate.outputs.resource_group }}
+          ORG: ASISaga
+        run: |
+          if [[ -z "$DISPATCH_TOKEN" ]]; then
+            echo "⏭️  DEPLOY_DISPATCH_TOKEN not set — skipping repository_dispatch"
+            echo "   To enable automatic code deployments, add a GitHub PAT with repo scope as DEPLOY_DISPATCH_TOKEN."
+            exit 0
+          fi
+
+          # Resolve Key Vault URL from the provisioned resource group.
+          KV_URL=$(az keyvault list \
+            --resource-group "$RESOURCE_GROUP" \
+            --query "[0].properties.vaultUri" \
+            --output tsv 2>/dev/null || echo "")
+
+          PAYLOAD=$(cat <<EOF
+          {
+            "environment": "${ENVIRONMENT}",
+            "resource_group": "${RESOURCE_GROUP}",
+            "key_vault_url": "${KV_URL}",
+            "infra_sha": "${{ github.sha }}",
+            "infra_run_id": "${{ github.run_id }}"
+          }
+          EOF
+          )
+
+          # Repositories to notify — platform services and MCP server modules.
+          REPOS=(
+            "agent-operating-system"
+            "aos-realm-of-agents"
+            "business-infinity"
+            "mcp"
+            "erpnext.asisaga.com"
+            "linkedin.asisaga.com"
+            "reddit.asisaga.com"
+            "subconscious.asisaga.com"
+          )
+
+          for REPO in "${REPOS[@]}"; do
+            HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+              -X POST \
+              -H "Accept: application/vnd.github.v3+json" \
+              -H "Authorization: Bearer ${DISPATCH_TOKEN}" \
+              -H "Content-Type: application/json" \
+              "https://api.github.com/repos/${ORG}/${REPO}/dispatches" \
+              -d "{\"event_type\": \"infra_provisioned\", \"client_payload\": ${PAYLOAD}}")
+
+            if [[ "$HTTP_STATUS" == "204" ]]; then
+              echo "  ✅ Dispatched infra_provisioned to ${ORG}/${REPO}"
+            else
+              echo "  ⚠️  Dispatch to ${ORG}/${REPO} returned HTTP ${HTTP_STATUS} (repo may not exist or token lacks access)"
+            fi
+          done (deploy mode, unless skipped) ──────
       - name: Post-Deploy Health Check
         id: health_check
         if: >-
@@ -669,6 +771,8 @@ jobs:
           echo "| **Phase 3** — AI Applications  | $(step_icon "${{ steps.deploy_ai_apps.outcome }}") |" >> "$GITHUB_STEP_SUMMARY"
           echo "| **Phase 4** — Function Apps    | $(step_icon "${{ steps.deploy_bicep_function_apps.outcome }}") |" >> "$GITHUB_STEP_SUMMARY"
           echo "| **Phase 5** — Governance       | $(step_icon "${{ steps.deploy_governance.outcome }}") |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Store client IDs in KV        | $(step_icon "${{ steps.store_client_ids.outcome }}") |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Signal code repos (dispatch)  | $(step_icon "${{ steps.dispatch_code_repos.outcome }}") |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Health Check      | $(step_icon "${{ steps.health_check.outcome }}") |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Function Apps     | $(step_icon "${{ steps.deploy_function_apps.outcome }}") |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Kernel Config     | $(step_icon "${{ steps.sync_kernel_config.outcome }}") |" >> "$GITHUB_STEP_SUMMARY"

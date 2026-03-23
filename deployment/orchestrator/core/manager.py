@@ -36,6 +36,7 @@ from orchestrator.automation.pipeline import PipelineManager
 from orchestrator.governance.cost_manager import CostManager
 from orchestrator.governance.policy_manager import PolicyManager
 from orchestrator.governance.rbac_manager import RbacManager
+from orchestrator.integration.identity_client import KeyVaultIdentityStore, ManagedIdentityClient
 from orchestrator.integration.kernel_bridge import KernelBridge
 from orchestrator.integration.sdk_bridge import SDKBridge
 from orchestrator.reliability.drift_detector import DriftDetector
@@ -730,6 +731,99 @@ class InfrastructureManager:
             return False
         print(f"  ✅ Kernel config synced ({len(env_vars)} vars)")
         return True
+
+    def fetch_identity_client_ids(self) -> bool:
+        """Fetch Function App Managed Identity client IDs and store in Key Vault.
+
+        Uses :class:`~orchestrator.integration.identity_client.ManagedIdentityClient`
+        (wrapping ``ManagedServiceIdentityClient`` from ``azure.mgmt.msi``) to
+        retrieve each Function App's User-Assigned Managed Identity ``clientId``
+        programmatically, then stores every value in Azure Key Vault via
+        :class:`~orchestrator.integration.identity_client.KeyVaultIdentityStore`.
+
+        Key Vault becomes the **state-sharing mechanism** between this Bicep
+        repository and the code repositories: after this step completes, each
+        code repository can retrieve its own ``AZURE_CLIENT_ID`` from Key Vault
+        using ``az keyvault secret show`` (authenticated via GitHub OIDC),
+        removing the need for manual secret management.
+
+        Returns ``True`` when all identity client IDs are fetched and stored
+        successfully.  Returns ``False`` when Key Vault is unavailable or no
+        managed identities are found.
+
+        Prerequisites: Phase 1 (foundation / Key Vault) and Phase 4 (Function Apps /
+        managed identities) must be deployed first.
+        """
+        # Resolve Key Vault name using the same uniqueString formula as main-modular.bicep.
+        import hashlib
+        import json
+        import subprocess
+
+        print("  🔑 Fetching Function App Managed Identity client IDs …")
+
+        # Query Key Vault name from the resource group (deployed by Phase 1).
+        try:
+            result = subprocess.run(
+                [
+                    "az", "keyvault", "list",
+                    "--resource-group", self.config.resource_group,
+                    "--query", "[0].properties.vaultUri",
+                    "--output", "tsv",
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            vault_url = result.stdout.strip()
+        except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+            logger.warning("Could not resolve Key Vault URL: %s", exc)
+            print(f"  ⚠️  Could not resolve Key Vault URL: {exc}")
+            return False
+
+        if not vault_url:
+            print("  ⚠️  No Key Vault found in resource group — is Phase 1 deployed?")
+            return False
+
+        msi_client = ManagedIdentityClient(
+            subscription_id=self.config.subscription_id,
+            resource_group=self.config.resource_group,
+        )
+        kv_store = KeyVaultIdentityStore(vault_url=vault_url)
+
+        identities = msi_client.list_function_app_identities(prefix="id-")
+        if not identities:
+            print("  ⚠️  No managed identities found — is Phase 4 deployed?")
+            return False
+
+        all_ok = True
+        for info in identities:
+            # Identity names follow the pattern id-{app_name}-{environment}.
+            # Strip the leading "id-" prefix and trailing "-{environment}" suffix
+            # to reconstruct the app_name and environment for the KV secret name.
+            parts = info.name.split("-")
+            if len(parts) < 3:
+                logger.warning("Unexpected identity name format: %s", info.name)
+                continue
+            env = parts[-1]
+            app_name = "-".join(parts[1:-1])
+
+            if not info.client_id:
+                print(f"  ⚠️  No client ID for {info.name} — skipping")
+                all_ok = False
+                continue
+
+            try:
+                kv_store.set_client_id(app_name, env, info.client_id)
+                print(f"  ✅ {info.name}: stored clientId in Key Vault "
+                      f"(secret: clientid-{app_name}-{env})")
+            except Exception as exc:  # pylint: disable=broad-except
+                logger.warning("Failed to store client ID for %s: %s", info.name, exc)
+                print(f"  ❌ {info.name}: failed to store — {exc}")
+                all_ok = False
+
+        if all_ok:
+            print(f"  ✅ All {len(identities)} client IDs stored in Key Vault: {vault_url}")
+        return all_ok
 
     # ------------------------------------------------------------------
     # Granular Bicep phase deployment entrypoints
