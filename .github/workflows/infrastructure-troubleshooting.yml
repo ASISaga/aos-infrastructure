@@ -48,6 +48,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -e .
+
       - name: Setup
         id: setup
         run: echo "resource_group=rg-aos-${{ inputs.environment }}" >> "$GITHUB_OUTPUT"
@@ -64,10 +72,10 @@ jobs:
         id: rg_check
         continue-on-error: true
         run: |
-          if az group show --name "${{ steps.setup.outputs.resource_group }}" &>/dev/null; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
+          AZURE_OPS="python3 deployment/orchestrator/cli/azure_ops.py --subscription-id ${{ secrets.AZURE_SUBSCRIPTION_ID }}"
+          RESULT=$($AZURE_OPS resource-group-exists --resource-group "${{ steps.setup.outputs.resource_group }}" 2>/dev/null || echo "false")
+          echo "exists=$RESULT" >> "$GITHUB_OUTPUT"
+          if [[ "$RESULT" != "true" ]]; then
             echo "::warning::Resource group ${{ steps.setup.outputs.resource_group }} does not exist."
           fi
 
@@ -76,38 +84,35 @@ jobs:
         continue-on-error: true
         run: |
           RESOURCE_GROUP="${{ steps.setup.outputs.resource_group }}"
+          AZURE_OPS="python3 deployment/orchestrator/cli/azure_ops.py --subscription-id ${{ secrets.AZURE_SUBSCRIPTION_ID }}"
           echo "# Resource Group Information" > diagnostics.txt
           echo "" >> diagnostics.txt
-          az group show --name "$RESOURCE_GROUP" >> diagnostics.txt 2>&1
+          $AZURE_OPS resource-group-show --resource-group "$RESOURCE_GROUP" >> diagnostics.txt 2>&1
           echo "" >> diagnostics.txt
           echo "## All Resources" >> diagnostics.txt
-          az resource list --resource-group "$RESOURCE_GROUP" -o table >> diagnostics.txt 2>&1
+          $AZURE_OPS list-resources --resource-group "$RESOURCE_GROUP" --output table >> diagnostics.txt 2>&1
 
       - name: Collect deployment history
         if: steps.rg_check.outputs.exists == 'true'
         continue-on-error: true
         run: |
           RESOURCE_GROUP="${{ steps.setup.outputs.resource_group }}"
+          AZURE_OPS="python3 deployment/orchestrator/cli/azure_ops.py --subscription-id ${{ secrets.AZURE_SUBSCRIPTION_ID }}"
           echo "" >> diagnostics.txt
           echo "## Recent Failed Deployments" >> diagnostics.txt
-          az deployment group list \
-            --resource-group "$RESOURCE_GROUP" \
-            --query "[?properties.provisioningState!='Succeeded'].{name:name, state:properties.provisioningState, timestamp:properties.timestamp}" \
-            -o table >> diagnostics.txt 2>&1 || echo "No deployment history found" >> diagnostics.txt
+          $AZURE_OPS list-deployments --resource-group "$RESOURCE_GROUP" --query failed --output table >> diagnostics.txt 2>&1 \
+            || echo "No deployment history found" >> diagnostics.txt
 
       - name: Collect activity logs
         if: steps.rg_check.outputs.exists == 'true'
         continue-on-error: true
         run: |
           RESOURCE_GROUP="${{ steps.setup.outputs.resource_group }}"
+          AZURE_OPS="python3 deployment/orchestrator/cli/azure_ops.py --subscription-id ${{ secrets.AZURE_SUBSCRIPTION_ID }}"
           echo "" >> diagnostics.txt
           echo "## Activity Logs (errors/warnings, last 24h)" >> diagnostics.txt
-          START_TIME=$(date -u -d '24 hours ago' +"%Y-%m-%dT%H:%M:%SZ")
-          az monitor activity-log list \
-            --resource-group "$RESOURCE_GROUP" \
-            --start-time "$START_TIME" \
-            --query "[?level=='Error' || level=='Warning'].{time:eventTimestamp, level:level, operation:operationName.localizedValue, status:status.localizedValue}" \
-            -o table >> diagnostics.txt 2>&1 || echo "No activity logs found" >> diagnostics.txt
+          $AZURE_OPS list-activity-logs --resource-group "$RESOURCE_GROUP" --hours 24 --output table >> diagnostics.txt 2>&1 \
+            || echo "No activity logs found" >> diagnostics.txt
 
       - name: Upload diagnostics
         if: always()
@@ -131,6 +136,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -e .
+
       - name: Azure Login (OIDC)
         uses: azure/login@v3
         with:
@@ -142,30 +155,28 @@ jobs:
         continue-on-error: true
         run: |
           RESOURCE_GROUP="${{ needs.collect-diagnostics.outputs.resource_group }}"
+          AZURE_OPS="python3 deployment/orchestrator/cli/azure_ops.py --subscription-id ${{ secrets.AZURE_SUBSCRIPTION_ID }}"
           echo "# Deployment Failure Analysis" > deployment-analysis.txt
 
-          FAILED_DEPLOYMENTS=$(az deployment group list \
-            --resource-group "$RESOURCE_GROUP" \
-            --query "[?properties.provisioningState=='Failed'].name" \
-            -o tsv 2>/dev/null || echo "")
+          FAILED_JSON=$($AZURE_OPS list-deployments --resource-group "$RESOURCE_GROUP" --query failed 2>/dev/null || echo "[]")
+          FAILED_NAMES=$(echo "$FAILED_JSON" | python3 -c "import sys,json; [print(d['name']) for d in json.load(sys.stdin)]" 2>/dev/null || echo "")
 
-          if [[ -z "$FAILED_DEPLOYMENTS" ]]; then
+          if [[ -z "$FAILED_NAMES" ]]; then
             echo "No failed deployments found." >> deployment-analysis.txt
           else
-            for DEPLOYMENT in $FAILED_DEPLOYMENTS; do
+            while IFS= read -r DEPLOYMENT; do
+              [[ -z "$DEPLOYMENT" ]] && continue
               echo "### Deployment: $DEPLOYMENT" >> deployment-analysis.txt
-              az deployment group show --name "$DEPLOYMENT" --resource-group "$RESOURCE_GROUP" \
-                --query "{state:properties.provisioningState, timestamp:properties.timestamp, error:properties.error}" \
-                -o json >> deployment-analysis.txt 2>&1
+              $AZURE_OPS show-deployment --resource-group "$RESOURCE_GROUP" --name "$DEPLOYMENT" >> deployment-analysis.txt 2>&1
               echo "" >> deployment-analysis.txt
-            done
+            done <<< "$FAILED_NAMES"
           fi
 
           echo "" >> deployment-analysis.txt
           echo "## Recommendations" >> deployment-analysis.txt
           echo "1. Review the error messages above" >> deployment-analysis.txt
           echo "2. Check regional availability of requested resources" >> deployment-analysis.txt
-          echo "3. Verify subscription quotas: \`az vm list-usage --location <region> -o table\`" >> deployment-analysis.txt
+          echo "3. Verify subscription quotas via the Azure portal" >> deployment-analysis.txt
           echo "4. Ensure the service principal has sufficient permissions" >> deployment-analysis.txt
           echo "5. Check parameter values in \`deployment/parameters/<env>.bicepparam\`" >> deployment-analysis.txt
 
@@ -173,14 +184,15 @@ jobs:
         continue-on-error: true
         run: |
           RESOURCE_GROUP="${{ needs.collect-diagnostics.outputs.resource_group }}"
+          AZURE_OPS="python3 deployment/orchestrator/cli/azure_ops.py --subscription-id ${{ secrets.AZURE_SUBSCRIPTION_ID }}"
           echo "" >> deployment-analysis.txt
           echo "## Source Control (Microsoft.Web/sites/sourcecontrols)" >> deployment-analysis.txt
-          FUNCTION_APPS=$(az functionapp list -g "$RESOURCE_GROUP" --query "[].name" -o tsv 2>/dev/null || echo "")
+          FUNCTION_APPS=$($AZURE_OPS list-function-apps --resource-group "$RESOURCE_GROUP" --output names 2>/dev/null || echo "")
           if [[ -n "$FUNCTION_APPS" ]]; then
             while IFS= read -r APP; do
-              SC=$(az webapp deployment source show -g "$RESOURCE_GROUP" -n "$APP" -o json 2>/dev/null || echo "{}")
+              [[ -z "$APP" ]] && continue
               echo "### $APP" >> deployment-analysis.txt
-              echo "$SC" >> deployment-analysis.txt
+              $AZURE_OPS show-source-control --resource-group "$RESOURCE_GROUP" --name "$APP" >> deployment-analysis.txt 2>&1
             done <<< "$FUNCTION_APPS"
           else
             echo "No Function Apps found in resource group." >> deployment-analysis.txt
@@ -208,6 +220,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -e .
+
       - name: Azure Login (OIDC)
         uses: azure/login@v3
         with:
@@ -219,21 +239,27 @@ jobs:
         continue-on-error: true
         run: |
           RESOURCE_GROUP="${{ needs.collect-diagnostics.outputs.resource_group }}"
+          AZURE_OPS="python3 deployment/orchestrator/cli/azure_ops.py --subscription-id ${{ secrets.AZURE_SUBSCRIPTION_ID }}"
           echo "# Performance Diagnostics" > performance-diagnostics.txt
 
-          FUNCTION_APPS=$(az functionapp list -g "$RESOURCE_GROUP" --query "[].name" -o tsv 2>/dev/null || echo "")
+          APPS_JSON=$($AZURE_OPS list-function-apps --resource-group "$RESOURCE_GROUP" 2>/dev/null || echo "[]")
+          APP_COUNT=$(echo "$APPS_JSON" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "0")
 
-          if [[ -n "$FUNCTION_APPS" ]]; then
-            END_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-            START_TIME=$(date -u -d '4 hours ago' +"%Y-%m-%dT%H:%M:%SZ")
-
-            for APP in $FUNCTION_APPS; do
-              RESOURCE_ID=$(az functionapp show -g "$RESOURCE_GROUP" -n "$APP" --query id -o tsv 2>/dev/null || echo "")
-              [[ -z "$RESOURCE_ID" ]] && continue
-              echo "## $APP" >> performance-diagnostics.txt
-              az monitor metrics list --resource "$RESOURCE_ID" --metric "Requests" \
-                --start-time "$START_TIME" --end-time "$END_TIME" --aggregation Total \
-                --interval PT1H -o table >> performance-diagnostics.txt 2>&1 || echo "N/A" >> performance-diagnostics.txt
+          if [[ "$APP_COUNT" -gt 0 ]]; then
+            echo "$APPS_JSON" | python3 -c "
+          import sys, json
+          apps = json.load(sys.stdin)
+          for app in apps:
+              print(f\"{app['name']}\t{app.get('resourceId', app.get('hostname', ''))}\")
+          " 2>/dev/null | while IFS=$'\t' read -r NAME RESOURCE_ID; do
+              [[ -z "$NAME" ]] && continue
+              # Get the resource ID for metrics
+              APP_INFO=$($AZURE_OPS function-app-status --resource-group "$RESOURCE_GROUP" --name "$NAME" 2>/dev/null || echo "{}")
+              RES_ID=$(echo "$APP_INFO" | python3 -c "import sys,json; print(json.load(sys.stdin).get('resourceId',''))" 2>/dev/null || echo "")
+              [[ -z "$RES_ID" ]] && continue
+              echo "## $NAME" >> performance-diagnostics.txt
+              $AZURE_OPS list-metrics --resource-id "$RES_ID" --metric "Requests" --hours 4 >> performance-diagnostics.txt 2>&1 \
+                || echo "N/A" >> performance-diagnostics.txt
               echo "" >> performance-diagnostics.txt
             done
           else
@@ -268,6 +294,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -e .
+
       - name: Azure Login (OIDC)
         uses: azure/login@v3
         with:
@@ -279,32 +313,35 @@ jobs:
         continue-on-error: true
         run: |
           RESOURCE_GROUP="${{ needs.collect-diagnostics.outputs.resource_group }}"
+          AZURE_OPS="python3 deployment/orchestrator/cli/azure_ops.py --subscription-id ${{ secrets.AZURE_SUBSCRIPTION_ID }}"
           echo "# Connectivity Diagnostics" > connectivity-diagnostics.txt
 
-          FUNCTION_APPS=$(az functionapp list -g "$RESOURCE_GROUP" \
-            --query "[].{name:name, hostname:defaultHostName}" -o tsv 2>/dev/null || echo "")
+          APPS_JSON=$($AZURE_OPS list-function-apps --resource-group "$RESOURCE_GROUP" --output hostnames 2>/dev/null || echo "")
 
-          if [[ -n "$FUNCTION_APPS" ]]; then
+          if [[ -n "$APPS_JSON" ]]; then
             echo "## Function App Connectivity" >> connectivity-diagnostics.txt
             while IFS=$'\t' read -r NAME HOSTNAME; do
+              [[ -z "$NAME" ]] && continue
               echo "### $NAME" >> connectivity-diagnostics.txt
-              if timeout 10 curl -f -s -o /dev/null "https://$HOSTNAME"; then
+              if [[ -n "$HOSTNAME" ]] && timeout 10 curl -f -s -o /dev/null "https://$HOSTNAME"; then
                 echo "✅ Reachable" >> connectivity-diagnostics.txt
               else
                 echo "❌ Not reachable" >> connectivity-diagnostics.txt
                 echo "  Fix: Check if the app is running, review firewall rules, verify DNS resolution" >> connectivity-diagnostics.txt
               fi
-            done <<< "$FUNCTION_APPS"
+            done <<< "$APPS_JSON"
           fi
 
-          NAMESPACES=$(az servicebus namespace list -g "$RESOURCE_GROUP" --query "[].name" -o tsv 2>/dev/null || echo "")
-          if [[ -n "$NAMESPACES" ]]; then
+          SB_JSON=$($AZURE_OPS list-servicebus-namespaces --resource-group "$RESOURCE_GROUP" 2>/dev/null || echo "[]")
+          SB_COUNT=$(echo "$SB_JSON" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "0")
+          if [[ "$SB_COUNT" -gt 0 ]]; then
             echo "" >> connectivity-diagnostics.txt
             echo "## Service Bus Connectivity" >> connectivity-diagnostics.txt
-            for NS in $NAMESPACES; do
-              STATUS=$(az servicebus namespace show -g "$RESOURCE_GROUP" -n "$NS" --query "status" -o tsv 2>/dev/null || echo "unknown")
-              echo "  $NS: $STATUS" >> connectivity-diagnostics.txt
-            done
+            echo "$SB_JSON" | python3 -c "
+          import sys, json
+          for ns in json.load(sys.stdin):
+              print(f\"  {ns['name']}: {ns['status']}\")
+          " >> connectivity-diagnostics.txt 2>&1
           fi
 
       - name: Upload diagnostics
@@ -329,6 +366,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -e .
+
       - name: Azure Login (OIDC)
         uses: azure/login@v3
         with:
@@ -341,24 +386,21 @@ jobs:
         run: |
           RESOURCE_GROUP="${{ needs.collect-diagnostics.outputs.resource_group }}"
           RESOURCE_NAME="${{ inputs.resource_name }}"
+          AZURE_OPS="python3 deployment/orchestrator/cli/azure_ops.py --subscription-id ${{ secrets.AZURE_SUBSCRIPTION_ID }}"
           echo "# Resource Error Diagnostics" > resource-diagnostics.txt
 
           if [[ -n "$RESOURCE_NAME" ]]; then
             echo "## Resource: $RESOURCE_NAME" >> resource-diagnostics.txt
-            az resource show --resource-group "$RESOURCE_GROUP" --name "$RESOURCE_NAME" \
-              -o json >> resource-diagnostics.txt 2>&1 || echo "Resource not found. Verify the resource name and type." >> resource-diagnostics.txt
+            $AZURE_OPS show-resource --resource-group "$RESOURCE_GROUP" --name "$RESOURCE_NAME" >> resource-diagnostics.txt 2>&1 \
+              || echo "Resource not found. Verify the resource name and type." >> resource-diagnostics.txt
           else
             echo "## All Resources" >> resource-diagnostics.txt
-            az resource list --resource-group "$RESOURCE_GROUP" \
-              --query "[].{name:name, type:type, location:location, provisioningState:provisioningState}" \
-              -o table >> resource-diagnostics.txt 2>&1
+            $AZURE_OPS list-resources --resource-group "$RESOURCE_GROUP" --output table >> resource-diagnostics.txt 2>&1
           fi
 
           echo "" >> resource-diagnostics.txt
           echo "## Resources in Failed State" >> resource-diagnostics.txt
-          az resource list --resource-group "$RESOURCE_GROUP" \
-            --query "[?provisioningState=='Failed'].{name:name, type:type}" \
-            -o table >> resource-diagnostics.txt 2>&1
+          $AZURE_OPS list-resources --resource-group "$RESOURCE_GROUP" --query failed --output table >> resource-diagnostics.txt 2>&1
 
       - name: Upload diagnostics
         if: always()
@@ -415,6 +457,6 @@ jobs:
           echo "| OIDC login fails | Add federated identity credential with subject \`repo:ASISaga/aos-infrastructure:environment:${{ inputs.environment }}\` |" >> "$GITHUB_STEP_SUMMARY"
           echo "| RBAC permission denied | Grant SP \`Contributor\` + \`User Access Administrator\` on the resource group |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Resource not found | Run the deployment workflow to provision infrastructure |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Function App not running | Restart: \`az functionapp restart -g rg-aos-${{ inputs.environment }} -n <name>\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Function App not running | Restart the Function App from the Azure portal or re-deploy |" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "Download the artifact files from this workflow run for detailed diagnostics." >> "$GITHUB_STEP_SUMMARY"
