@@ -1,9 +1,6 @@
 name: Azure Cost Management — Scale-Down-to-Zero Audit
 
 on:
-  schedule:
-    # Run daily at 06:00 UTC
-    - cron: '0 6 * * *'
   workflow_dispatch:
     inputs:
       environment:
@@ -35,36 +32,10 @@ env:
   PYTHON_VERSION: '3.12'
 
 jobs:
-  # -----------------------------------------------------------------------
-  # Matrix: audit each active environment when triggered by schedule.
-  # When triggered manually, audit only the selected environment.
-  # -----------------------------------------------------------------------
-  prepare:
-    name: 'Prepare audit matrix'
-    runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.build_matrix.outputs.matrix }}
-    steps:
-      - name: Build environment matrix
-        id: build_matrix
-        run: |
-          if [[ "${{ github.event_name }}" == "schedule" ]]; then
-            # Audit all environments on schedule
-            echo 'matrix={"include":[{"environment":"dev"},{"environment":"staging"},{"environment":"prod"}]}' >> "$GITHUB_OUTPUT"
-          else
-            # Audit selected environment on manual dispatch
-            ENV="${{ inputs.environment }}"
-            echo "matrix={\"include\":[{\"environment\":\"${ENV}\"}]}" >> "$GITHUB_OUTPUT"
-          fi
-
   audit:
-    name: 'Scale-Down Audit — ${{ matrix.environment }}'
-    needs: prepare
+    name: 'Scale-Down Audit — ${{ inputs.environment }}'
     runs-on: ubuntu-latest
-    environment: ${{ matrix.environment }}
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    environment: ${{ inputs.environment }}
 
     steps:
       - name: Checkout
@@ -88,7 +59,7 @@ jobs:
       - name: Resolve resource group
         id: resolve
         run: |
-          ENV="${{ matrix.environment }}"
+          ENV="${{ inputs.environment }}"
           RG="${{ inputs.resource_group }}"
           [ -z "$RG" ] && RG="rg-aos-${ENV}"
           PERIOD="${{ inputs.cost_period_days }}"
@@ -164,14 +135,11 @@ jobs:
       # -----------------------------------------------------------------------
       - name: Create GitHub issue for violations
         id: create_issue
-        if: >
-          steps.scale_audit.outcome == 'failure' &&
-          (github.event_name == 'schedule' || inputs.create_issue == true)
+        if: steps.scale_audit.outcome == 'failure' && inputs.create_issue == true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           ENV="${{ steps.resolve.outputs.environment }}"
-          RG="${{ steps.resolve.outputs.resource_group }}"
           REPORT='${{ runner.temp }}/audit_report.json'
           BODY_FILE='${{ runner.temp }}/issue_body.md'
 
@@ -260,3 +228,4 @@ jobs:
           echo "1. Review the GitHub issue created above for per-resource recommendations." >> "$GITHUB_STEP_SUMMARY"
           echo "2. Update Bicep modules in \`deployment/modules/\` to use serverless/consumption-tier resources." >> "$GITHUB_STEP_SUMMARY"
           echo "3. Re-run this workflow after applying fixes to confirm all violations are resolved." >> "$GITHUB_STEP_SUMMARY"
+

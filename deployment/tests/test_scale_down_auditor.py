@@ -255,6 +255,68 @@ class TestScaleDownAuditorClassify:
         result = self._auditor()._classify(r)
         assert result is True
 
+    # ---- Storage Account ----
+
+    def test_storage_account_compliant(self) -> None:
+        r = _resource("staosfuncdev", "Microsoft.Storage/storageAccounts", sku="Standard_LRS")
+        result = self._auditor()._classify(r)
+        assert result is True
+
+    # ---- Key Vault ----
+
+    def test_keyvault_compliant(self) -> None:
+        r = _resource("kv-aos-dev", "Microsoft.KeyVault/vaults")
+        result = self._auditor()._classify(r)
+        assert result is True
+
+    # ---- Managed Identity ----
+
+    def test_managed_identity_compliant(self) -> None:
+        r = _resource("id-func-dev", "Microsoft.ManagedIdentity/userAssignedIdentities")
+        result = self._auditor()._classify(r)
+        assert result is True
+
+    # ---- Log Analytics / Application Insights ----
+
+    def test_log_analytics_compliant(self) -> None:
+        r = _resource("law-aos-dev", "Microsoft.OperationalInsights/workspaces")
+        result = self._auditor()._classify(r)
+        assert result is True
+
+    def test_app_insights_compliant(self) -> None:
+        r = _resource("appi-aos-dev", "Microsoft.Insights/components")
+        result = self._auditor()._classify(r)
+        assert result is True
+
+    # ---- ML Registry ----
+
+    def test_ml_registry_compliant(self) -> None:
+        r = _resource("registry-aos", "Microsoft.MachineLearningServices/registries")
+        result = self._auditor()._classify(r)
+        assert result is True
+
+    # ---- AML Serverless Endpoint ----
+
+    def test_aml_serverless_endpoint_compliant(self) -> None:
+        r = _resource(
+            "ep-lora-dev",
+            "Microsoft.MachineLearningServices/workspaces/serverlessEndpoints",
+        )
+        result = self._auditor()._classify(r)
+        assert result is True
+
+    # ---- AML Online Endpoint (violation) ----
+
+    def test_aml_online_endpoint_violation(self) -> None:
+        r = _resource(
+            "ep-ceo-agent",
+            "Microsoft.MachineLearningServices/workspaces/onlineEndpoints",
+        )
+        result = self._auditor()._classify(r)
+        assert isinstance(result, ScaleDownViolation)
+        assert "minimumReplicaCount" in result.recommendation or "serverless" in result.recommendation.lower()
+        assert len(result.alternatives) > 0
+
     # ---- Unknown resource type ----
 
     def test_unknown_resource_type_skipped(self) -> None:

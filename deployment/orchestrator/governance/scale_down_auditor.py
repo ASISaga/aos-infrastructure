@@ -23,7 +23,13 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Resource-type classification catalogue
 # ---------------------------------------------------------------------------
-# Maps lowercase resource type → (supports_scale_to_zero, recommendation)
+# Maps lowercase resource type → classification metadata.
+#
+# ALL keys are stored in lowercase because _classify() normalises the type
+# string via str.lower() before lookup — this gives case-insensitive
+# matching regardless of how the ARM API or Azure SDK returns the type
+# (e.g. "Microsoft.Web/serverFarms" and "microsoft.web/serverfarms" both
+# resolve to the same entry).
 #
 # supports_scale_to_zero:
 #   True  — resource natively scales to zero (e.g. Consumption Function App)
@@ -185,6 +191,38 @@ _RESOURCE_CATALOGUE: dict[str, dict[str, Any]] = {
             "Azure Storage Queue – pay-per-operation",
         ],
     },
+    # ---------- Storage & Identity (pay-per-use, no idle compute charge) ----------
+    "microsoft.storage/storageaccounts": {
+        "supports_scale_to_zero": True,  # Pay-per-GB stored + operations; no idle compute cost
+        "condition": None,
+        "recommendation": "",
+        "alternatives": [],
+    },
+    "microsoft.keyvault/vaults": {
+        "supports_scale_to_zero": True,  # Pay-per-operation only; no minimum compute charge
+        "condition": None,
+        "recommendation": "",
+        "alternatives": [],
+    },
+    "microsoft.managedidentity/userassignedidentities": {
+        "supports_scale_to_zero": True,  # Free resource; no compute cost
+        "condition": None,
+        "recommendation": "",
+        "alternatives": [],
+    },
+    # ---------- Monitoring (pay-per-ingestion, no idle compute charge) ----------
+    "microsoft.operationalinsights/workspaces": {
+        "supports_scale_to_zero": True,  # Pay-per-GB ingested; no cost when idle
+        "condition": None,
+        "recommendation": "",
+        "alternatives": [],
+    },
+    "microsoft.insights/components": {
+        "supports_scale_to_zero": True,  # Pay-per-GB telemetry ingested; free tier available
+        "condition": None,
+        "recommendation": "",
+        "alternatives": [],
+    },
     # ---------- AI / ML ----------
     "microsoft.cognitiveservices/accounts": {
         "supports_scale_to_zero": True,  # Pay-as-you-go / standard metered = zero when idle
@@ -211,6 +249,35 @@ _RESOURCE_CATALOGUE: dict[str, dict[str, Any]] = {
             "AML Compute Cluster – set minNodeCount=0",
             "AML Compute Instance – enable auto-shutdown",
             "AML Serverless Compute (preview)",
+        ],
+    },
+    "microsoft.machinelearningservices/registries": {
+        "supports_scale_to_zero": True,  # Registry metadata + storage only; no idle compute charge
+        "condition": None,
+        "recommendation": "",
+        "alternatives": [],
+    },
+    "microsoft.machinelearningservices/workspaces/serverlessendpoints": {
+        "supports_scale_to_zero": True,  # Serverless endpoints bill per-token; zero cost when idle
+        "condition": None,
+        "recommendation": "",
+        "alternatives": [],
+    },
+    "microsoft.machinelearningservices/workspaces/onlineendpoints": {
+        "supports_scale_to_zero": False,
+        "condition": None,
+        "recommendation": (
+            "Azure ML Managed Online Endpoints back deployments with dedicated VM instances "
+            "that incur an hourly charge regardless of request volume. "
+            "Set 'minimumReplicaCount: 0' and enable 'scale-to-zero' on the deployment "
+            "autoscale policy, or replace with a Serverless Online Endpoint "
+            "(Microsoft.MachineLearningServices/workspaces/serverlessEndpoints) which "
+            "bills per token and scales to zero when idle."
+        ),
+        "alternatives": [
+            "AML Serverless Endpoint (serverlessEndpoints) – pay-per-token, true scale-to-zero",
+            "AML Managed Online Endpoint – set minimumReplicaCount=0 in autoscale policy",
+            "Azure Container Apps – event-driven autoscaling to zero",
         ],
     },
     # ---------- Search ----------
