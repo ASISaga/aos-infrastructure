@@ -1,6 +1,6 @@
 [build-system]
 requires = ["setuptools>=75.0.0", "wheel"]
-build-backend = "setuptools.backends._legacy:_Backend"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "aos-infrastructure"
@@ -18,6 +18,8 @@ dependencies = [
     "azure-mgmt-msi>=7.0.0",
     "azure-keyvault-secrets>=4.7.0",
     "azure-mgmt-web>=7.0.0",
+    "azure-mgmt-monitor>=6.0.0",
+    "azure-mgmt-servicebus>=8.0.0",
 ]
 
 [project.optional-dependencies]
@@ -33,6 +35,9 @@ testpaths = ["deployment/tests"]
 Homepage = "https://github.com/ASISaga/aos-infrastructure"
 Documentation = "https://github.com/ASISaga/aos-infrastructure/tree/main/docs"
 Repository = "https://github.com/ASISaga/aos-infrastructure"
+
+[tool.setuptools.packages.find]
+where = ["deployment"]
 
 [tool.pylint.main]
 max-line-length = 120

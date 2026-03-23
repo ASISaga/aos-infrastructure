@@ -5,3 +5,5 @@ azure-mgmt-costmanagement>=4.0.0
 azure-mgmt-msi>=7.0.0
 azure-keyvault-secrets>=4.7.0
 azure-mgmt-web>=7.0.0
+azure-mgmt-monitor>=6.0.0
+azure-mgmt-servicebus>=8.0.0
