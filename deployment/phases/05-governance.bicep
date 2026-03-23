@@ -1,12 +1,12 @@
 // Phase 5 — Governance (Frugal-First, Sovereign Architecture)
 //
-// Deploys the governance layer using Azure Verified Modules (AVM):
+// Deploys the governance layer:
 //   - Azure Policy assignments (allowed locations, HTTPS storage, KV soft-delete)
-//     via AVM authorization/policy-assignment — non-deprecated schema, per-env enforcement
+//     using native Microsoft.Authorization/policyAssignments — per-env enforcement
 //   - AI SKU governance policy (GlobalStandard / serverless only, no PTU/Provisioned)
-//     — custom policy definition at subscription scope + AVM assignment
+//     — custom policy definition at subscription scope + native assignment
 //   - Cost Management budget with email alerts
-//     via AVM consumption/budget — non-deprecated schema
+//     using native Microsoft.Consumption/budgets
 //
 // Frugal-First principles enforced:
 //   • All AI model deployments must use GlobalStandard (serverless, scale-to-zero) SKU.

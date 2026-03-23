@@ -11,7 +11,7 @@ targetScope = 'subscription'
 
 // ── Policy definition ─────────────────────────────────────────────────────────
 
-resource aiSkuDenyPolicy 'Microsoft.Authorization/policyDefinitions@2024-04-01' = {
+resource aiSkuDenyPolicy 'Microsoft.Authorization/policyDefinitions@2021-06-01' = {
   name: 'aos-deny-provisioned-ai-sku'
   properties: {
     displayName: '[AOS] Deny Provisioned / PTU AI model deployment SKUs'

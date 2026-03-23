@@ -1,9 +1,12 @@
-// budget.bicep — Azure Cost Management budget using Azure Verified Modules (AVM)
+// budget.bicep — Azure Cost Management budget
 //
-// Wraps the AVM consumption/budget module to:
-//   - Derive sensible default start/end dates via utcNow() when none are provided.
-//   - Forward alert-threshold notifications in the compact array form supported by AVM.
-//   - Expose only the parameters callers need (amount, emails, optional date overrides).
+// Deploys a monthly cost budget using the native Microsoft.Consumption/budgets
+// resource (API version 2021-10-01):
+//   - Derives sensible default start/end dates via utcNow() when none are provided.
+//   - Creates alert notifications for each configured threshold when contact emails
+//     are supplied.
+//   - Scale-to-zero is implicit: the budget tracks actual spend against serverless
+//     (GlobalStandard / Standard) resources that cost nothing when idle.
 
 @description('Deployment environment (dev, staging, prod)')
 param environment string
@@ -11,7 +14,7 @@ param environment string
 @description('Monthly budget limit in the subscription currency')
 param budgetAmount int = 500
 
-@description('Budget alert threshold percentages (0–100)')
+@description('Budget alert threshold percentages (0–100). Values must be integers (e.g. [50, 80, 100]).')
 param alertThresholds array = [50, 80, 100]
 
 @description('Email addresses to notify when a threshold is crossed')
@@ -36,23 +39,38 @@ var resolvedEndDate   = empty(endDate)   ? '${currentYear}-12-31' : endDate
 // ── Budget name ──────────────────────────────────────────────────────────────
 var budgetName = 'aos-budget-${environment}'
 
-// ── AVM: Cost Management budget ─────────────────────────────────────────────
-// Uses the AVM consumption/budget module (non-deprecated schema).
-// Scale-to-zero is implicit: the budget tracks actual spend against serverless
-// (GlobalStandard / Standard) resources that cost nothing when idle.
-module budget 'br/public:avm/res/consumption/budget:0.1.1' = {
+// ── Budget notifications ─────────────────────────────────────────────────────
+// Build one notification entry per threshold when contact emails are provided.
+// Notification keys are derived from the threshold value (e.g. 'actual-80pct').
+var hasEmails = length(contactEmails) > 0
+var notifications = reduce(alertThresholds, {}, (prev, threshold) =>
+  union(prev, hasEmails ? {
+    'actual-${threshold}pct': {
+      enabled: true
+      operator: 'GreaterThanOrEqualTo'
+      threshold: threshold
+      contactEmails: contactEmails
+      thresholdType: 'Actual'
+    }
+  } : {})
+)
+
+// ── Native: Cost Management budget ──────────────────────────────────────────
+resource budgetResource 'Microsoft.Consumption/budgets@2021-10-01' = {
   name: budgetName
-  params: {
-    name: budgetName
+  properties: {
     amount: budgetAmount
-    startDate: resolvedStartDate
-    endDate: resolvedEndDate
-    contactEmails: contactEmails
-    thresholds: alertThresholds
+    category: 'Cost'
+    timeGrain: 'Monthly'
+    timePeriod: {
+      startDate: resolvedStartDate
+      endDate: resolvedEndDate
+    }
+    notifications: notifications
   }
 }
 
 // ── Outputs ──────────────────────────────────────────────────────────────────
-output budgetId string = budget.outputs.resourceId
-output budgetName string = budget.outputs.name
+output budgetId string = budgetResource.id
+output budgetName string = budgetResource.name
 output budgetAmount int = budgetAmount
