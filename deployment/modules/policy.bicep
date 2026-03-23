@@ -1,15 +1,14 @@
-// policy.bicep — AOS governance policy assignments using Azure Verified Modules (AVM)
+// policy.bicep — AOS governance policy assignments
 //
 // Assigns the standard AOS governance policy initiative to the deployment scope.
 //
-// All assignments use the AVM authorization/policy-assignment module, which:
-//   - Uses a current, non-deprecated API version
-//   - Follows the AVM interface contract (name, policyDefinitionId, enforcementMode, …)
+// All assignments use the native Microsoft.Authorization/policyAssignments resource
+// (API version 2022-06-01) with per-environment enforcement mode.
 //
 // AI SKU governance (enableAiSkuGovernance=true) additionally:
 //   1. Creates a custom policy definition at subscription scope (ai-sku-policy-def.bicep)
 //      that denies Provisioned / PTU AI model deployment SKUs.
-//   2. Assigns that definition via AVM so only GlobalStandard (serverless, scale-to-zero)
+//   2. Assigns that definition so only GlobalStandard (serverless, scale-to-zero)
 //      or Standard (regional) SKUs can be deployed — never Provisioned/PTU.
 
 @description('Deployment environment (dev, staging, prod)')
@@ -45,11 +44,10 @@ module aiSkuPolicyDef 'ai-sku-policy-def.bicep' = {
   scope: subscription()
 }
 
-// ── AVM: Allowed Locations ────────────────────────────────────────────────────
-module allowedLocationsAssignment 'br/public:avm/res/authorization/policy-assignment:0.4.3' = {
+// ── Native: Allowed Locations ────────────────────────────────────────────────
+resource allowedLocationsAssignment 'Microsoft.Authorization/policyAssignments@2022-06-01' = {
   name: 'aos-allowed-locations-${environment}'
-  params: {
-    name: 'aos-allowed-locations-${environment}'
+  properties: {
     displayName: '[AOS] Allowed locations — ${environment}'
     policyDefinitionId: policyAllowedLocations
     parameters: {
@@ -61,22 +59,20 @@ module allowedLocationsAssignment 'br/public:avm/res/authorization/policy-assign
   }
 }
 
-// ── AVM: Require HTTPS on Storage ─────────────────────────────────────────────
-module httpsStorageAssignment 'br/public:avm/res/authorization/policy-assignment:0.4.3' = {
+// ── Native: Require HTTPS on Storage ─────────────────────────────────────────
+resource httpsStorageAssignment 'Microsoft.Authorization/policyAssignments@2022-06-01' = {
   name: 'aos-https-storage-${environment}'
-  params: {
-    name: 'aos-https-storage-${environment}'
+  properties: {
     displayName: '[AOS] Require HTTPS on Storage — ${environment}'
     policyDefinitionId: policyRequireHttpsStorage
     enforcementMode: enforceMode
   }
 }
 
-// ── AVM: Key Vault soft-delete ────────────────────────────────────────────────
-module kvSoftDeleteAssignment 'br/public:avm/res/authorization/policy-assignment:0.4.3' = {
+// ── Native: Key Vault soft-delete ────────────────────────────────────────────
+resource kvSoftDeleteAssignment 'Microsoft.Authorization/policyAssignments@2022-06-01' = {
   name: 'aos-kv-softdelete-${environment}'
-  params: {
-    name: 'aos-kv-softdelete-${environment}'
+  properties: {
     displayName: '[AOS] Key Vault soft-delete — ${environment}'
     policyDefinitionId: policyKeyVaultSoftDelete
     // Always enforced regardless of environment — KV soft-delete is a data-protection baseline.
@@ -84,13 +80,12 @@ module kvSoftDeleteAssignment 'br/public:avm/res/authorization/policy-assignment
   }
 }
 
-// ── AVM: Deny Provisioned / PTU AI model deployment SKUs ─────────────────────
+// ── Native: Deny Provisioned / PTU AI model deployment SKUs ──────────────────
 // Enforces Frugal-First governance: GlobalStandard (serverless, scale-to-zero) and
 // Standard (regional) SKUs only. PTU / Provisioned capacity is never allowed.
-module aiSkuDenyAssignment 'br/public:avm/res/authorization/policy-assignment:0.4.3' = if (enableAiSkuGovernance) {
+resource aiSkuDenyAssignment 'Microsoft.Authorization/policyAssignments@2022-06-01' = if (enableAiSkuGovernance) {
   name: 'aos-deny-provisioned-ai-sku-${environment}'
-  params: {
-    name: 'aos-deny-provisioned-ai-sku-${environment}'
+  properties: {
     displayName: '[AOS] Deny Provisioned / PTU AI SKUs — ${environment}'
     policyDefinitionId: aiSkuPolicyDef.outputs.policyDefinitionId
     enforcementMode: enforceMode
@@ -98,6 +93,6 @@ module aiSkuDenyAssignment 'br/public:avm/res/authorization/policy-assignment:0.
 }
 
 // ── Outputs ───────────────────────────────────────────────────────────────────
-output allowedLocationsAssignmentId string = allowedLocationsAssignment.outputs.resourceId
-output httpsStorageAssignmentId string = httpsStorageAssignment.outputs.resourceId
-output kvSoftDeleteAssignmentId string = kvSoftDeleteAssignment.outputs.resourceId
+output allowedLocationsAssignmentId string = allowedLocationsAssignment.id
+output httpsStorageAssignmentId string = httpsStorageAssignment.id
+output kvSoftDeleteAssignmentId string = kvSoftDeleteAssignment.id
