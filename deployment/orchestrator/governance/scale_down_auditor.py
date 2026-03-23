@@ -251,12 +251,6 @@ _RESOURCE_CATALOGUE: dict[str, dict[str, Any]] = {
             "AML Serverless Compute (preview)",
         ],
     },
-    "microsoft.machinelearningservices/registries": {
-        "supports_scale_to_zero": True,  # Registry metadata + storage only; no idle compute charge
-        "condition": None,
-        "recommendation": "",
-        "alternatives": [],
-    },
     "microsoft.machinelearningservices/workspaces/serverlessendpoints": {
         "supports_scale_to_zero": True,  # Serverless endpoints bill per-token; zero cost when idle
         "condition": None,

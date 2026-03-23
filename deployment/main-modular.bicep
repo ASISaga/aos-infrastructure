@@ -214,18 +214,6 @@ module aiProject 'modules/ai-project.bicep' = {
   }
 }
 
-// Model Registry — permanent storage for LoRA adapter assets
-module modelRegistry 'modules/model-registry.bicep' = {
-  name: 'model-registry-${suffix}'
-  params: {
-    location: locationML
-    environment: environment
-    projectName: projectName
-    uniqueSuffix: uniqueSuffix
-    tags: tags
-  }
-}
-
 // Single shared Llama-3.3-70B-Instruct Managed Online Endpoint with Multi-LoRA support.
 // All C-suite agents share this one endpoint; each agent specifies its own LoRA adapter
 // via the adapter_id field in the scoring request body at inference time.
@@ -393,7 +381,6 @@ output aiProjectDiscoveryUrl string = aiProject.outputs.projectDiscoveryUrl
 output aiGatewayName string = aiGateway.outputs.gatewayName
 output aiGatewayUrl string = aiGateway.outputs.gatewayUrl
 // Multi-LoRA inference outputs — single shared endpoint for all C-suite agents
-output modelRegistryName string = modelRegistry.outputs.registryName
 output loraInferenceEndpointName string = loraInference.outputs.endpointName
 output loraInferenceScoringUri string = loraInference.outputs.scoringUri
 // Foundry C-suite endpoints created by foundryApps module

@@ -767,7 +767,7 @@ class TestKernelBridge:
         # Old per-agent array keys must NOT be present — they were replaced by scalar outputs.
         assert "loraInferenceEndpointNames" not in _OUTPUT_TO_ENV_MAP
         assert "loraInferenceScoringUris" not in _OUTPUT_TO_ENV_MAP
-        assert "modelRegistryName" in _OUTPUT_TO_ENV_MAP
+        assert "modelRegistryName" not in _OUTPUT_TO_ENV_MAP
 
     def test_translate_outputs_standard(self, kb: KernelBridge) -> None:
         outputs = {

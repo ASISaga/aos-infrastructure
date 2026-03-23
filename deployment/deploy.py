@@ -211,7 +211,7 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("deploy-bicep-foundation", parents=[step_parent],
                           help="Deploy Phase 1 — foundation resources (monitoring/storage/serviceBus/keyVault)")
     subparsers.add_parser("deploy-bicep-ai-services", parents=[step_parent],
-                          help="Deploy Phase 2 — AI services (aiServices/aiHub/aiProject/modelRegistry)")
+                          help="Deploy Phase 2 — AI services (aiServices/aiHub/aiProject)")
     subparsers.add_parser("deploy-bicep-ai-apps", parents=[step_parent],
                           help="Deploy Phase 3 — AI applications (loraInference/foundryApps/aiGateway/a2aConnections)")
     subparsers.add_parser("deploy-bicep-function-apps", parents=[step_parent],

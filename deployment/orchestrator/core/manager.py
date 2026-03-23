@@ -842,7 +842,7 @@ class InfrastructureManager:
         )
 
     def deploy_bicep_ai_services(self) -> bool:
-        """Deploy Phase 2 — AI Services (aiServices, aiHub, aiProject, modelRegistry).
+        """Deploy Phase 2 — AI Services (aiServices, aiHub, aiProject).
 
         Requires Phase 1 (foundation) to be deployed first.
         """

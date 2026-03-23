@@ -39,10 +39,29 @@ param aiServicesAccountName string
 // ====================================================================
 
 var hubName = 'ai-hub-${projectName}-${environment}-${take(uniqueSuffix, 6)}'
+// ACR names must be 5–50 alphanumeric characters; no hyphens allowed.
+// Pattern: 'acr' (3) + projectName (≥1) + environment (≥3) + 8 uniqueSuffix chars → ≥15 chars.
+var acrName = 'acr${projectName}${environment}${take(uniqueSuffix, 8)}'
 
 // ====================================================================
 // Resources
 // ====================================================================
+
+// Basic SKU Container Registry — sufficient for storing LoRA adapters and MLflow assets.
+// No cross-region replication or geo-redundancy required for this use case.
+// Admin user disabled; the Hub's system-assigned managed identity authenticates via
+// Azure ML's built-in ACR RBAC integration (AcrPull/AcrPush assigned automatically).
+resource containerRegistry 'Microsoft.ContainerRegistry/registries@2023-01-01-preview' = {
+  name: acrName
+  location: location
+  tags: tags
+  sku: {
+    name: 'Basic'
+  }
+  properties: {
+    adminUserEnabled: false
+  }
+}
 
 resource aiHub 'Microsoft.MachineLearningServices/workspaces@2024-10-01' = {
   name: hubName
@@ -58,6 +77,7 @@ resource aiHub 'Microsoft.MachineLearningServices/workspaces@2024-10-01' = {
     storageAccount: storageAccountId
     keyVault: keyVaultId
     applicationInsights: appInsightsId
+    containerRegistry: containerRegistry.id
     publicNetworkAccess: environment == 'prod' ? 'Disabled' : 'Enabled'
   }
 }
@@ -85,3 +105,5 @@ resource aiServicesConnection 'Microsoft.MachineLearningServices/workspaces/conn
 output hubName string = aiHub.name
 output hubId string = aiHub.id
 output hubPrincipalId string = aiHub.identity.principalId
+output containerRegistryId string = containerRegistry.id
+output containerRegistryName string = containerRegistry.name

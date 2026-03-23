@@ -288,13 +288,6 @@ class TestScaleDownAuditorClassify:
         result = self._auditor()._classify(r)
         assert result is True
 
-    # ---- ML Registry ----
-
-    def test_ml_registry_compliant(self) -> None:
-        r = _resource("registry-aos", "Microsoft.MachineLearningServices/registries")
-        result = self._auditor()._classify(r)
-        assert result is True
-
     # ---- AML Serverless Endpoint ----
 
     def test_aml_serverless_endpoint_compliant(self) -> None:

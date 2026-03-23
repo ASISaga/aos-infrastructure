@@ -2,9 +2,8 @@
 //
 // Deploys the Azure AI / ML backend resources:
 //   - Azure AI Services (Cognitive Services — OpenAI, language, vision)
-//   - Azure AI Foundry Hub (ML workspace, Hub kind)
+//   - Azure AI Foundry Hub (ML workspace, Hub kind) with Basic ACR for model asset storage
 //   - Azure AI Foundry Project (ML workspace, Project kind)
-//   - Model Registry (stores LoRA adapter assets for C-suite agents)
 //
 // Prerequisites: Phase 1 (foundation) must be deployed first.
 // Cross-phase references use `existing` to read storage, keyVault, and appInsights
@@ -108,17 +107,6 @@ module aiProject '../modules/ai-project.bicep' = {
   }
 }
 
-module modelRegistry '../modules/model-registry.bicep' = {
-  name: 'model-registry-${suffix}'
-  params: {
-    location: locationML
-    environment: environment
-    projectName: projectName
-    uniqueSuffix: uniqueSuffix
-    tags: tags
-  }
-}
-
 // ====================================================================
 // Outputs
 // ====================================================================
@@ -131,4 +119,3 @@ output aiHubId string = aiHub.outputs.hubId
 output aiProjectName string = aiProject.outputs.projectName
 output aiProjectId string = aiProject.outputs.projectId
 output aiProjectDiscoveryUrl string = aiProject.outputs.projectDiscoveryUrl
-output modelRegistryName string = modelRegistry.outputs.registryName
