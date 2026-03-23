@@ -1,0 +1,231 @@
+name: Azure Cost Management — Scale-Down-to-Zero Audit
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        default: 'dev'
+        type: choice
+        options: [dev, staging, prod]
+      resource_group:
+        description: 'Resource group name (leave blank for default rg-aos-<env>)'
+        required: false
+        default: ''
+      create_issue:
+        description: 'Create a GitHub issue when violations are found'
+        required: false
+        default: true
+        type: boolean
+      cost_period_days:
+        description: 'Look-back period (days) for cost report'
+        required: false
+        default: '30'
+
+permissions:
+  id-token: write
+  contents: read
+  issues: write
+
+env:
+  PYTHON_VERSION: '3.12'
+
+jobs:
+  audit:
+    name: 'Scale-Down Audit — ${{ inputs.environment }}'
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: pip install -r deployment/orchestrator/requirements.txt
+
+      - name: Azure login
+        uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Resolve resource group
+        id: resolve
+        run: |
+          ENV="${{ inputs.environment }}"
+          RG="${{ inputs.resource_group }}"
+          [ -z "$RG" ] && RG="rg-aos-${ENV}"
+          PERIOD="${{ inputs.cost_period_days }}"
+          [ -z "$PERIOD" ] && PERIOD="30"
+          echo "environment=$ENV"      >> "$GITHUB_OUTPUT"
+          echo "resource_group=$RG"   >> "$GITHUB_OUTPUT"
+          echo "cost_period=$PERIOD"  >> "$GITHUB_OUTPUT"
+
+      # -----------------------------------------------------------------------
+      # Cost report — current spend summary
+      # -----------------------------------------------------------------------
+      - name: Current cost report
+        id: cost_report
+        continue-on-error: true
+        run: |
+          python - <<'EOF'
+          import sys, json
+          sys.path.insert(0, 'deployment/orchestrator')
+          from governance.cost_manager import CostManager
+
+          cm = CostManager(
+              '${{ steps.resolve.outputs.resource_group }}',
+              '${{ secrets.AZURE_SUBSCRIPTION_ID }}',
+          )
+          summary = cm.get_current_spend(period_days=int('${{ steps.resolve.outputs.cost_period }}'))
+          print(json.dumps(summary, indent=2))
+
+          # Emit structured outputs
+          with open('${{ runner.temp }}/cost_summary.json', 'w') as f:
+              json.dump(summary, f)
+
+          total = summary.get('total_cost', 0)
+          currency = summary.get('currency', 'USD')
+          print(f"::notice::Cost ({currency}): {total:,.2f} over last ${{ steps.resolve.outputs.cost_period }} day(s)")
+          EOF
+
+      # -----------------------------------------------------------------------
+      # Scale-down-to-zero audit
+      # -----------------------------------------------------------------------
+      - name: Scale-down-to-zero audit
+        id: scale_audit
+        run: |
+          python - <<'PYEOF'
+          import sys, json, os
+          sys.path.insert(0, 'deployment/orchestrator')
+          from governance.scale_down_auditor import ScaleDownAuditor
+
+          auditor = ScaleDownAuditor(
+              '${{ steps.resolve.outputs.resource_group }}',
+              '${{ secrets.AZURE_SUBSCRIPTION_ID }}',
+          )
+          report = auditor.audit()
+
+          # Write full report JSON for later steps
+          report_path = os.path.join('${{ runner.temp }}', 'audit_report.json')
+          with open(report_path, 'w') as f:
+              json.dump(report.to_dict(), f, indent=2)
+
+          # Write issue body for later steps (only when violations exist)
+          if report.has_violations:
+              body_path = os.path.join('${{ runner.temp }}', 'issue_body.md')
+              body = report.format_issue_body(environment='${{ steps.resolve.outputs.environment }}')
+              with open(body_path, 'w') as f:
+                  f.write(body)
+              print(f"::warning::Scale-down violations found: {len(report.violations)} resource(s) cannot scale to zero")
+              sys.exit(1)   # Non-zero exit marks this step as failed for summary
+          else:
+              print("::notice::All audited resources are scale-to-zero compliant ✅")
+          PYEOF
+
+      # -----------------------------------------------------------------------
+      # Create GitHub issue when violations are detected
+      # -----------------------------------------------------------------------
+      - name: Create GitHub issue for violations
+        id: create_issue
+        if: steps.scale_audit.outcome == 'failure' && inputs.create_issue == true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ENV="${{ steps.resolve.outputs.environment }}"
+          REPORT='${{ runner.temp }}/audit_report.json'
+          BODY_FILE='${{ runner.temp }}/issue_body.md'
+
+          VIOLATION_COUNT=$(python -c "import json; d=json.load(open('$REPORT')); print(d['violation_count'])")
+
+          # Check if an open issue already exists for this environment to avoid duplicates
+          EXISTING=$(gh issue list \
+            --label "cost-management,scale-to-zero,$ENV" \
+            --state open \
+            --json number \
+            --jq '.[0].number' 2>/dev/null || echo "")
+
+          if [[ -n "$EXISTING" ]]; then
+            echo "::notice::Updating existing issue #${EXISTING} with latest audit results"
+            gh issue edit "$EXISTING" \
+              --body-file "$BODY_FILE" \
+              --title "⚠️ Scale-Down-to-Zero Violations — ${ENV} (${VIOLATION_COUNT} resource(s))"
+            echo "issue_number=$EXISTING" >> "$GITHUB_OUTPUT"
+            echo "issue_action=updated"   >> "$GITHUB_OUTPUT"
+          else
+            ISSUE_URL=$(gh issue create \
+              --title "⚠️ Scale-Down-to-Zero Violations — ${ENV} (${VIOLATION_COUNT} resource(s))" \
+              --body-file "$BODY_FILE" \
+              --label "cost-management,scale-to-zero,$ENV" \
+              --assignee "${{ github.repository_owner }}")
+            ISSUE_NUM=$(echo "$ISSUE_URL" | grep -oE '[0-9]+$')
+            echo "issue_number=$ISSUE_NUM" >> "$GITHUB_OUTPUT"
+            echo "issue_action=created"    >> "$GITHUB_OUTPUT"
+            echo "::notice::Issue created: $ISSUE_URL"
+          fi
+
+      # -----------------------------------------------------------------------
+      # Step summary
+      # -----------------------------------------------------------------------
+      - name: Audit summary
+        if: always()
+        run: |
+          echo "## 💰 Cost Management — Scale-Down Audit" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Field | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Environment | \`${{ steps.resolve.outputs.environment }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Resource group | \`${{ steps.resolve.outputs.resource_group }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Cost look-back | ${{ steps.resolve.outputs.cost_period }} day(s) |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          # Cost report
+          if [[ "${{ steps.cost_report.outcome }}" == "success" ]]; then
+            COST_FILE="${{ runner.temp }}/cost_summary.json"
+            if [[ -f "$COST_FILE" ]]; then
+              TOTAL=$(python -c "import json; d=json.load(open('$COST_FILE')); print(f\"{d['currency']} {d['total_cost']:,.2f}\")")
+              echo "| Total spend | ${TOTAL} |" >> "$GITHUB_STEP_SUMMARY"
+            fi
+            echo "| Cost report | ✅ retrieved |" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "| Cost report | ⚠️ unavailable | Ensure SP has \`Cost Management Reader\` role. |" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          # Scale-down audit
+          AUDIT_FILE="${{ runner.temp }}/audit_report.json"
+          if [[ -f "$AUDIT_FILE" ]]; then
+            TOTAL=$(python -c "import json; d=json.load(open('$AUDIT_FILE')); print(d['total_resources'])")
+            VIOLATIONS=$(python -c "import json; d=json.load(open('$AUDIT_FILE')); print(d['violation_count'])")
+            COMPLIANT=$(python -c "import json; d=json.load(open('$AUDIT_FILE')); print(d['compliant_count'])")
+            echo "| Resources audited | ${TOTAL} |" >> "$GITHUB_STEP_SUMMARY"
+            echo "| Compliant | ✅ ${COMPLIANT} |" >> "$GITHUB_STEP_SUMMARY"
+            if [[ "$VIOLATIONS" -gt 0 ]]; then
+              echo "| Violations | ❌ ${VIOLATIONS} — see issue #${{ steps.create_issue.outputs.issue_number }} |" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "| Violations | ✅ 0 — all resources scale to zero |" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          elif [[ "${{ steps.scale_audit.outcome }}" == "failure" ]]; then
+            echo "| Scale-down audit | ❌ failed | Check Azure login and resource group access. |" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          # Issue
+          if [[ "${{ steps.create_issue.outcome }}" == "success" ]]; then
+            ACTION="${{ steps.create_issue.outputs.issue_action }}"
+            NUM="${{ steps.create_issue.outputs.issue_number }}"
+            echo "| GitHub issue | ✅ ${ACTION} — [#${NUM}](../../issues/${NUM}) |" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### 📋 How to resolve violations" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "1. Review the GitHub issue created above for per-resource recommendations." >> "$GITHUB_STEP_SUMMARY"
+          echo "2. Update Bicep modules in \`deployment/modules/\` to use serverless/consumption-tier resources." >> "$GITHUB_STEP_SUMMARY"
+          echo "3. Re-run this workflow after applying fixes to confirm all violations are resolved." >> "$GITHUB_STEP_SUMMARY"
+
