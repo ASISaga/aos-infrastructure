@@ -1,5 +1,7 @@
-// Foundry App module — provisions a managed online endpoint + deployment for an agent
-// Reuses patterns from lora-inference.bicep; expects a model registered in the Model Registry
+// Foundry App module — provisions a serverless endpoint for an agent
+// Uses azureml://registries/azureml-meta/models/Llama-3.3-70B-Instruct/versions/9 which supports
+// Serverless APIs and fine-tuning. Azure manages the underlying GPU compute — no subscription
+// quota is required.
 
 @description('Azure region for ML workloads')
 param location string
@@ -27,82 +29,52 @@ param projectName string
 @description('Resource tags')
 param tags object = {}
 
-@description('AI Project workspace resource ID (parent for the endpoint). Must be a Project-kind workspace — Hub workspaces do not support online endpoint creation.')
+@description('AI Project workspace resource ID (parent for the endpoint). Must be a Project-kind workspace — Hub workspaces do not support serverless endpoint creation.')
 param workspaceId string
 
 @description('Application logical name (used to derive endpoint name)')
 param appName string
 
-@description('Model identifier (azureml://registries/... or other registry id)')
-param modelId string
+@description('Base model asset ID from an Azure ML registry. Defaults to Llama-3.3-70B-Instruct version 9 from the azureml-meta registry — supports Serverless APIs and fine-tuning.')
+param modelId string = 'azureml://registries/azureml-meta/models/Llama-3.3-70B-Instruct/versions/9'
 
-@description('VM instance type for the managed online deployment.')
-param instanceType string = 'Standard_DS3_v2'
-
-@description('SKU capacity (number of replicas for the managed online deployment; 1 = single replica)')
-param skuCapacity int = 1
-
-@description('When true, creates the online deployment resource (requires the model asset to exist in the registry). Set to false to create only the endpoint shell until the LoRA adapter model has been trained and registered.')
-param deployModel bool = true
+@description('When true, creates the serverless endpoint resource. Set to false to create only the endpoint name reservation until the model version is confirmed available in the target region.')
+param deployEndpoint bool = false
 
 // ====================================================================
 // Variables
 // ====================================================================
 
-// Azure ML online endpoint names are globally unique per region — a short 6-char suffix derived
-// from the resource-group-level uniqueSuffix is insufficient to prevent cross-subscription
+// Azure ML serverless endpoint names are globally unique per region — a short 6-char suffix
+// derived from the resource-group-level uniqueSuffix is insufficient to prevent cross-subscription
 // collisions. We recompute a per-agent hash here (including appName) and take 8 characters to
 // provide adequate uniqueness while staying within the 32-character Azure ML name limit.
 // The projectName is still part of the hash input but is omitted from the visible name to keep
 // the full name ≤ 32 chars.
 var endpointSuffix = take(uniqueString(resourceGroup().id, projectName, environment, appName), 8)
 var endpointName = 'ep-${appName}-${environment}-${endpointSuffix}'
-var deploymentName = '${appName}-deployment'
 
 // ====================================================================
-// Managed Online Endpoint
+// Serverless Endpoint
+// Azure manages the underlying GPU compute — no subscription quota required.
+// Conditional on deployEndpoint=true to allow infrastructure provisioning before the
+// specific model version is confirmed available in the target region.
 // ====================================================================
 
-resource endpoint 'Microsoft.MachineLearningServices/workspaces/onlineEndpoints@2024-10-01' = {
+resource agentEndpoint 'Microsoft.MachineLearningServices/workspaces/serverlessEndpoints@2024-10-01' = if (deployEndpoint) {
   name: '${split(workspaceId, '/')[8]}/${endpointName}'
   location: location
   tags: tags
-  identity: {
-    type: 'SystemAssigned'
-  }
-  properties: {
-    description: 'Foundry endpoint for ${appName} (${environment})'
-    authMode: 'Key'
-    publicNetworkAccess: environment == 'prod' ? 'Disabled' : 'Enabled'
-  }
-}
-
-// ====================================================================
-// Deployment — uses a model reference (Model Registry) for predictable infra.
-// Only deployed when deployModel=true (i.e., the LoRA adapter has been trained
-// and registered in the model registry).
-// ====================================================================
-
-resource agentDeployment 'Microsoft.MachineLearningServices/workspaces/onlineEndpoints/deployments@2024-10-01' = if (deployModel) {
-  parent: endpoint
-  name: deploymentName
-  location: location
-  tags: tags
   sku: {
-    // Default SKU — standard VM-backed managed online deployment
-    name: 'Default'
-    capacity: skuCapacity
+    name: 'Consumption'
   }
   properties: {
-    endpointComputeType: 'Managed'
-    model: modelId
-    instanceType: instanceType
-    description: 'Agent deployment for ${appName}'
-    scaleSettings: {
-      scaleType: 'Default'
+    modelSettings: {
+      modelId: modelId
     }
-    requestSettings: {
-      maxConcurrentRequestsPerInstance: 4
+    authMode: 'Key'
+    contentSafety: {
+      contentSafetyStatus: 'Disabled'
     }
   }
 }
@@ -112,10 +84,12 @@ resource agentDeployment 'Microsoft.MachineLearningServices/workspaces/onlineEnd
 // ====================================================================
 
 output endpointName string = endpointName
-@description('The deployment resource name, or empty string when deployModel=false (no deployment created yet).')
-output deploymentName string = deployModel ? deploymentName : ''
-output scoringUri string = endpoint.properties.scoringUri
-output endpointId string = endpoint.id
+@description('The endpoint resource name, or empty string when deployEndpoint=false (no endpoint created yet).')
+output deploymentName string = deployEndpoint ? endpointName : ''
+// Non-null assertion (!) is safe: the ternary condition mirrors the `if (deployEndpoint)` resource
+// guard, so agentEndpoint is guaranteed to exist when deployEndpoint=true.
+output endpointId string = deployEndpoint ? agentEndpoint!.id : ''
+output scoringUri string = deployEndpoint ? agentEndpoint!.properties.inferenceEndpoint.uri : ''
 
 // Nested deployment for Agent Service resources (user-supplied template)
 #disable-next-line no-deployments-resources
