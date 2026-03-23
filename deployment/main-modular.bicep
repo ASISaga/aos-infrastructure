@@ -93,7 +93,7 @@ param agentTemplateParameters object = {}
 @description('Enable nested deployment of the provided `agentTemplate` for each foundry app')
 param useAgentNestedDeployment bool = false
 
-@description('When true, creates online deployments for each foundry agent (requires the LoRA adapter models to be already registered in the model registry). Set to false to provision only the endpoint shells until adapters are trained. Workflow: 1) deploy with false (default) to create infra; 2) run fine-tuning jobs; 3) re-deploy with true once models are confirmed in the registry.')
+@description('When true, creates the serverless endpoint for each foundry agent using Llama-3.3-70B-Instruct from the azureml-meta registry. Set to false (default) to skip endpoint creation until the model version is confirmed available in the target region.')
 param deployFoundryModels bool = false
 
 @description('List of MCP server modules from the ASISaga/mcp repository and its submodules. Each entry specifies the Azure-safe app name and the actual GitHub repository name (which may contain dots) used for Workload Identity Federation.')
@@ -241,9 +241,9 @@ module loraInference 'modules/lora-inference.bicep' = {
   }
 }
 
-// Create Foundry-hosted C-suite agent endpoints (one per foundryAppNames entry)
-// All agents share the single LoRA inference endpoint; per-agent adapter selection
-// happens at inference time via the adapter_id in the scoring request body.
+// Create Foundry-hosted C-suite agent serverless endpoints (one per foundryAppNames entry)
+// Each agent uses Llama-3.3-70B-Instruct from the azureml-meta registry via a serverless endpoint.
+// Azure manages the underlying GPU compute — no subscription quota required.
 // Endpoints are created under the AI Project workspace (not Hub) as required by Azure ML.
 module foundryApps 'modules/foundry-app.bicep' = [for (fa, i) in foundryAppNames: {
   name: 'foundry-${fa}-${suffix}'
@@ -254,10 +254,7 @@ module foundryApps 'modules/foundry-app.bicep' = [for (fa, i) in foundryAppNames
     tags: tags
     workspaceId: aiProject.outputs.projectId
     appName: fa
-    // LoRA adapter model registered in the Model Registry for this agent
-    modelId: 'azureml://registries/${modelRegistry.outputs.registryName}/models/${fa}-lora-adapter/versions/1'
-    skuCapacity: 1
-    deployModel: deployFoundryModels
+    deployEndpoint: deployFoundryModels
     useNestedDeployment: useAgentNestedDeployment
     agentTemplate: agentTemplate
     agentTemplateParameters: agentTemplateParameters

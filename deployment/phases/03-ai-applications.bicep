@@ -45,7 +45,7 @@ param foundryAppNames array = [
   'cmo-agent'
 ]
 
-@description('When true, creates online deployments for each foundry agent. Set to false to provision only the endpoint shells until LoRA adapters are registered.')
+@description('When true, creates the serverless endpoint for each foundry agent using Llama-3.3-70B-Instruct from the azureml-meta registry. Set to false (default) to skip endpoint creation until the model version is confirmed available in the target region.')
 param deployFoundryModels bool = false
 
 @description('When true, creates the shared LoRA inference serverless endpoint. Set to false (default) to skip endpoint creation until the model version is confirmed available in the target region.')
@@ -74,7 +74,6 @@ var uniqueSuffix = uniqueString(resourceGroup().id, projectName, environment)
 // Deterministic names for Phase-2 resources — mirrors naming in each module.
 var aiProjectName = 'ai-project-${projectName}-${environment}-${take(uniqueSuffix, 6)}'
 var aiServicesAccountName = 'ai-${projectName}-${environment}-${take(uniqueSuffix, 6)}'
-var modelRegistryName = 'mlreg-${projectName}-${environment}-${take(uniqueSuffix, 6)}'
 
 // Deterministic name for Phase-1 resource.
 var foundationAppInsightsName = 'appi-${projectName}-${environment}'
@@ -116,7 +115,8 @@ module loraInference '../modules/lora-inference.bicep' = {
   }
 }
 
-// Foundry-hosted C-suite agent endpoints (one per foundryAppNames entry).
+// Foundry-hosted C-suite agent serverless endpoints (one per foundryAppNames entry).
+// Each agent uses Llama-3.3-70B-Instruct from the azureml-meta registry via a serverless endpoint.
 module foundryApps '../modules/foundry-app.bicep' = [for (fa, i) in foundryAppNames: {
   name: 'foundry-${fa}-${suffix}'
   params: {
@@ -126,9 +126,7 @@ module foundryApps '../modules/foundry-app.bicep' = [for (fa, i) in foundryAppNa
     tags: tags
     workspaceId: existingAiProject.id
     appName: fa
-    modelId: 'azureml://registries/${modelRegistryName}/models/${fa}-lora-adapter/versions/1'
-    skuCapacity: 1
-    deployModel: deployFoundryModels
+    deployEndpoint: deployFoundryModels
     useNestedDeployment: useAgentNestedDeployment
     agentTemplate: agentTemplate
     agentTemplateParameters: agentTemplateParameters
