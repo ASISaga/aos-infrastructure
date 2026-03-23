@@ -39,19 +39,20 @@ After running the infrastructure deployment from `aos-infrastructure`, follow th
 
 After infrastructure provisioning, each Function App's Managed Identity `clientId` is stored automatically in Azure Key Vault by the `fetch-identity-client-ids` pipeline step (uses `ManagedServiceIdentityClient` from `azure.mgmt.msi`). Retrieve it:
 
-```bash
-# Log in first
-az login
+```python
+# Ensure azure-identity and azure-keyvault-secrets are installed:
+#   pip install azure-identity azure-keyvault-secrets
 
-# List Key Vaults in the resource group to find the vault name
-az keyvault list --resource-group "rg-aos-<env>" --query "[].name" -o tsv
+from azure.identity import DefaultAzureCredential
+from azure.keyvault.secrets import SecretClient
 
-# Retrieve the client ID — replace <kv-name>, <APP_NAME>, and <env>
-az keyvault secret show \
-  --vault-name "<kv-name>" \
-  --name "clientid-<APP_NAME>-<env>" \
-  --query value \
-  --output tsv
+# Replace <kv-name>, <APP_NAME>, and <env> with your values
+kv_url = "https://<kv-name>.vault.azure.net"
+secret_name = "clientid-<APP_NAME>-<env>"
+
+cred = DefaultAzureCredential()
+client = SecretClient(vault_url=kv_url, credential=cred)
+print(client.get_secret(secret_name).value)
 ```
 
 > **First run**: When infrastructure is provisioned, the `infra_provisioned` `repository_dispatch` event automatically triggers the code repository's deploy workflow with the `key_vault_url` and `environment` in the payload. The workflow retrieves `AZURE_CLIENT_ID` from Key Vault automatically — no manual step required.
@@ -106,11 +107,14 @@ The `mcp` repository deploys to all four MCP server Function Apps. Each Function
 | `mcp-subconscious-prod` | `clientid-mcp-subconscious-prod` | `func-mcp-subconscious-prod-*` |
 
 Retrieve each `AZURE_CLIENT_ID` from Key Vault:
-```bash
-az keyvault secret show \
-  --vault-name "<kv-name>" \
-  --name "clientid-mcp-<app>-<env>" \
-  --query value -o tsv
+```python
+from azure.identity import DefaultAzureCredential
+from azure.keyvault.secrets import SecretClient
+
+kv_url = "https://<kv-name>.vault.azure.net"
+cred = DefaultAzureCredential()
+client = SecretClient(vault_url=kv_url, credential=cred)
+print(client.get_secret("clientid-mcp-<app>-<env>").value)
 ```
 
 The OIDC federated credentials for `mcp` repo are provisioned by `deployment/phases/04-function-apps.bicep` via the `additionalGithubRepo: 'mcp'` parameter. Run infrastructure deployment first.
@@ -142,11 +146,23 @@ permissions:
 
 Azure Function App names include a unique 6-character suffix derived from the resource group ID at deployment time (`uniqueString(resourceGroup().id, projectName, environment)`). The deployment workflows discover the exact name at runtime:
 
-```bash
-az functionapp list \
-  --resource-group "rg-aos-dev" \
-  --query "[?starts_with(name, 'func-agent-operating-system-dev-')].name | [0]" \
-  --output tsv
+```python
+# Ensure azure-identity and azure-mgmt-web are installed:
+#   pip install azure-identity azure-mgmt-web
+
+from azure.identity import DefaultAzureCredential
+from azure.mgmt.web import WebSiteManagementClient
+
+subscription_id = "<your-subscription-id>"
+resource_group = "rg-aos-dev"
+prefix = "func-agent-operating-system-dev-"
+
+cred = DefaultAzureCredential()
+client = WebSiteManagementClient(cred, subscription_id)
+for app in client.web_apps.list_by_resource_group(resource_group):
+    if (app.name or "").startswith(prefix):
+        print(app.name)
+        break
 ```
 
 ## Deployment Method
