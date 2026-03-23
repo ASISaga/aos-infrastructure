@@ -31,7 +31,6 @@ _OUTPUT_TO_ENV_MAP: dict[str, str] = {
     "storageAccountName": "AOS_STORAGE_ACCOUNT",
     "aiHubName": "AZURE_ML_HUB_NAME",
     "aiProjectName": "AZURE_ML_PROJECT_NAME",
-    "modelRegistryName": "LORA_MODEL_REGISTRY_NAME",
     "resourceGroupName": "AZURE_RESOURCE_GROUP",
     # Single shared LoRA inference endpoint — all C-suite agents use the same endpoint
     # and differentiate via adapter_id in the scoring request body at inference time.

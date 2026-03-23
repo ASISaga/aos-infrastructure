@@ -27,7 +27,6 @@ MODULE_MAP: Dict[str, str] = {
     "microsoft.keyvault/vaults": "modules/keyvault.bicep",
     "microsoft.cognitiveservices/accounts": "modules/ai-services.bicep",
     "microsoft.machinelearningservices/workspaces": "modules/ai-hub.bicep or ai-project.bicep",
-    "microsoft.machinelearningservices/registries": "modules/model-registry.bicep",
     "microsoft.apimanagement/service": "modules/ai-gateway.bicep",
     "microsoft.web/sites": "modules/functionapp.bicep",
     "microsoft.web/serverfarms": "modules/functionapp.bicep",

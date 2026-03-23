@@ -101,7 +101,6 @@ class TestModuleMapCompleteness:
         "microsoft.web/sites/sourcecontrols",
         "microsoft.apimanagement/service",
         "microsoft.machinelearningservices/workspaces",
-        "microsoft.machinelearningservices/registries",
     ]
 
     @pytest.mark.parametrize("resource_type", EXPECTED_TYPES)
