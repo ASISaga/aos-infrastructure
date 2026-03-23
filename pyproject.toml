@@ -17,6 +17,7 @@ dependencies = [
     "azure-mgmt-costmanagement>=4.0.0",
     "azure-mgmt-msi>=7.0.0",
     "azure-keyvault-secrets>=4.7.0",
+    "azure-mgmt-web>=7.0.0",
 ]
 
 [project.optional-dependencies]

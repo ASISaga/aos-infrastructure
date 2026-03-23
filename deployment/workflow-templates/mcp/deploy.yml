@@ -17,11 +17,14 @@
 #   3. For each environment, add:
 #        AZURE_CLIENT_ID     — Managed identity client ID for that specific MCP Function App.
 #                              Retrieve from Key Vault after infrastructure provisioning:
-#                                az login
-#                                az keyvault secret show \
-#                                  --vault-name "<kv-name>" \
-#                                  --name "clientid-<APP_NAME>-<env>" \
-#                                  --query value -o tsv
+#                                python3 - <<'PYEOF'
+#                                import os
+#                                from azure.identity import DefaultAzureCredential
+#                                from azure.keyvault.secrets import SecretClient
+#                                cred = DefaultAzureCredential()
+#                                secret = SecretClient(vault_url="https://<kv-name>.vault.azure.net", credential=cred)
+#                                print(secret.get_secret("clientid-<APP_NAME>-<env>").value)
+#                                PYEOF
 #                              The Key Vault name is shown in the infrastructure deploy run summary.
 #                              On the first run, the infra_provisioned repository_dispatch event
 #                              triggers this workflow automatically with client IDs in the payload.
@@ -114,34 +117,47 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
+          pip install --quiet azure-identity azure-keyvault-secrets azure-mgmt-web
           if [[ -f requirements.txt ]]; then
             pip install --target=".python_packages/lib/site-packages" -r requirements.txt
           fi
 
+      - name: Azure Login (OIDC) — bootstrap for Key Vault access
+        if: needs.set-environment.outputs.key_vault_url != ''
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
       - name: Retrieve AZURE_CLIENT_ID from Key Vault
         id: kv_client_id
         if: needs.set-environment.outputs.key_vault_url != ''
+        env:
+          KV_URL: ${{ needs.set-environment.outputs.key_vault_url }}
+          DEPLOY_ENV: ${{ needs.set-environment.outputs.deploy_env }}
+          FALLBACK_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
         run: |
-          KV_URL="${ needs.set-environment.outputs.key_vault_url }"
-          ENV="${ needs.set-environment.outputs.deploy_env }"
-          SECRET_NAME="clientid-mcp-erpnext-${{ENV}}"
+          export SECRET_NAME="clientid-mcp-erpnext-${DEPLOY_ENV}"
+          CLIENT_ID=$(python3 <<'PYEOF'
+import os
+from azure.identity import DefaultAzureCredential
+from azure.keyvault.secrets import SecretClient
 
-          # Bootstrap login with GitHub environment secret to access Key Vault.
-          az login --service-principal \
-            --username "${{ secrets.AZURE_CLIENT_ID }}" \
-            --federated-token "$(curl -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api://AzureADTokenExchange" | python3 -c "import sys,json; print(json.load(sys.stdin)['value'])")" \
-            --tenant "${{ secrets.AZURE_TENANT_ID }}" 2>/dev/null || true
-
-          CLIENT_ID=$(az keyvault secret show \
-            --vault-name "$(echo "$KV_URL" | sed 's|https://||; s|\.vault\.azure\.net.*||')" \
-            --name "$SECRET_NAME" \
-            --query value -o tsv 2>/dev/null || echo "")
+try:
+    cred = DefaultAzureCredential()
+    secret = SecretClient(vault_url=os.environ["KV_URL"], credential=cred).get_secret(os.environ["SECRET_NAME"])
+    print(secret.value)
+except Exception:
+    pass
+PYEOF
+          )
 
           if [[ -n "$CLIENT_ID" ]]; then
-            echo "client_id=${{CLIENT_ID}}" >> "$GITHUB_OUTPUT"
-            echo "  ✅ Retrieved AZURE_CLIENT_ID from Key Vault (secret: ${{SECRET_NAME}})"
+            echo "client_id=${CLIENT_ID}" >> "$GITHUB_OUTPUT"
+            echo "  ✅ Retrieved AZURE_CLIENT_ID from Key Vault (secret: ${SECRET_NAME})"
           else
-            echo "client_id=${{ secrets.AZURE_CLIENT_ID }}" >> "$GITHUB_OUTPUT"
+            echo "client_id=${FALLBACK_CLIENT_ID}" >> "$GITHUB_OUTPUT"
             echo "  ⚠️  Secret not found in Key Vault; falling back to GitHub environment secret"
           fi
 
@@ -156,14 +172,26 @@ jobs:
         id: resolve
         env:
           DEPLOY_ENV: ${{ needs.set-environment.outputs.deploy_env }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
           APP_NAME: mcp-erpnext
         run: |
           RESOURCE_GROUP="${{ vars.AZURE_RESOURCE_GROUP || format('rg-aos-{0}', env.DEPLOY_ENV) }}"
-          PREFIX="func-${APP_NAME}-${DEPLOY_ENV}-"
-          FUNCTION_APP=$(az functionapp list \
-            --resource-group "$RESOURCE_GROUP" \
-            --query "[?starts_with(name, '${PREFIX}')].name | [0]" \
-            --output tsv 2>/dev/null)
+          export PREFIX="func-${APP_NAME}-${DEPLOY_ENV}-"
+          export RESOURCE_GROUP
+
+          FUNCTION_APP=$(python3 <<'PYEOF'
+import os, sys
+from azure.identity import DefaultAzureCredential
+from azure.mgmt.web import WebSiteManagementClient
+cred = DefaultAzureCredential()
+client = WebSiteManagementClient(cred, os.environ["AZURE_SUBSCRIPTION_ID"])
+for app in client.web_apps.list_by_resource_group(os.environ["RESOURCE_GROUP"]):
+    if (app.name or "").startswith(os.environ["PREFIX"]):
+        print(app.name)
+        sys.exit(0)
+sys.exit(1)
+PYEOF
+          )
           if [[ -z "$FUNCTION_APP" ]]; then
             echo "❌ No Function App found with prefix '${PREFIX}' in resource group '${RESOURCE_GROUP}'"
             exit 1
@@ -201,34 +229,47 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
+          pip install --quiet azure-identity azure-keyvault-secrets azure-mgmt-web
           if [[ -f requirements.txt ]]; then
             pip install --target=".python_packages/lib/site-packages" -r requirements.txt
           fi
 
+      - name: Azure Login (OIDC) — bootstrap for Key Vault access
+        if: needs.set-environment.outputs.key_vault_url != ''
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
       - name: Retrieve AZURE_CLIENT_ID from Key Vault
         id: kv_client_id
         if: needs.set-environment.outputs.key_vault_url != ''
+        env:
+          KV_URL: ${{ needs.set-environment.outputs.key_vault_url }}
+          DEPLOY_ENV: ${{ needs.set-environment.outputs.deploy_env }}
+          FALLBACK_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
         run: |
-          KV_URL="${ needs.set-environment.outputs.key_vault_url }"
-          ENV="${ needs.set-environment.outputs.deploy_env }"
-          SECRET_NAME="clientid-mcp-linkedin-${{ENV}}"
+          export SECRET_NAME="clientid-mcp-linkedin-${DEPLOY_ENV}"
+          CLIENT_ID=$(python3 <<'PYEOF'
+import os
+from azure.identity import DefaultAzureCredential
+from azure.keyvault.secrets import SecretClient
 
-          # Bootstrap login with GitHub environment secret to access Key Vault.
-          az login --service-principal \
-            --username "${{ secrets.AZURE_CLIENT_ID }}" \
-            --federated-token "$(curl -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api://AzureADTokenExchange" | python3 -c "import sys,json; print(json.load(sys.stdin)['value'])")" \
-            --tenant "${{ secrets.AZURE_TENANT_ID }}" 2>/dev/null || true
-
-          CLIENT_ID=$(az keyvault secret show \
-            --vault-name "$(echo "$KV_URL" | sed 's|https://||; s|\.vault\.azure\.net.*||')" \
-            --name "$SECRET_NAME" \
-            --query value -o tsv 2>/dev/null || echo "")
+try:
+    cred = DefaultAzureCredential()
+    secret = SecretClient(vault_url=os.environ["KV_URL"], credential=cred).get_secret(os.environ["SECRET_NAME"])
+    print(secret.value)
+except Exception:
+    pass
+PYEOF
+          )
 
           if [[ -n "$CLIENT_ID" ]]; then
-            echo "client_id=${{CLIENT_ID}}" >> "$GITHUB_OUTPUT"
-            echo "  ✅ Retrieved AZURE_CLIENT_ID from Key Vault (secret: ${{SECRET_NAME}})"
+            echo "client_id=${CLIENT_ID}" >> "$GITHUB_OUTPUT"
+            echo "  ✅ Retrieved AZURE_CLIENT_ID from Key Vault (secret: ${SECRET_NAME})"
           else
-            echo "client_id=${{ secrets.AZURE_CLIENT_ID }}" >> "$GITHUB_OUTPUT"
+            echo "client_id=${FALLBACK_CLIENT_ID}" >> "$GITHUB_OUTPUT"
             echo "  ⚠️  Secret not found in Key Vault; falling back to GitHub environment secret"
           fi
 
@@ -243,14 +284,26 @@ jobs:
         id: resolve
         env:
           DEPLOY_ENV: ${{ needs.set-environment.outputs.deploy_env }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
           APP_NAME: mcp-linkedin
         run: |
           RESOURCE_GROUP="${{ vars.AZURE_RESOURCE_GROUP || format('rg-aos-{0}', env.DEPLOY_ENV) }}"
-          PREFIX="func-${APP_NAME}-${DEPLOY_ENV}-"
-          FUNCTION_APP=$(az functionapp list \
-            --resource-group "$RESOURCE_GROUP" \
-            --query "[?starts_with(name, '${PREFIX}')].name | [0]" \
-            --output tsv 2>/dev/null)
+          export PREFIX="func-${APP_NAME}-${DEPLOY_ENV}-"
+          export RESOURCE_GROUP
+
+          FUNCTION_APP=$(python3 <<'PYEOF'
+import os, sys
+from azure.identity import DefaultAzureCredential
+from azure.mgmt.web import WebSiteManagementClient
+cred = DefaultAzureCredential()
+client = WebSiteManagementClient(cred, os.environ["AZURE_SUBSCRIPTION_ID"])
+for app in client.web_apps.list_by_resource_group(os.environ["RESOURCE_GROUP"]):
+    if (app.name or "").startswith(os.environ["PREFIX"]):
+        print(app.name)
+        sys.exit(0)
+sys.exit(1)
+PYEOF
+          )
           if [[ -z "$FUNCTION_APP" ]]; then
             echo "❌ No Function App found with prefix '${PREFIX}' in resource group '${RESOURCE_GROUP}'"
             exit 1
@@ -288,34 +341,47 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
+          pip install --quiet azure-identity azure-keyvault-secrets azure-mgmt-web
           if [[ -f requirements.txt ]]; then
             pip install --target=".python_packages/lib/site-packages" -r requirements.txt
           fi
 
+      - name: Azure Login (OIDC) — bootstrap for Key Vault access
+        if: needs.set-environment.outputs.key_vault_url != ''
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
       - name: Retrieve AZURE_CLIENT_ID from Key Vault
         id: kv_client_id
         if: needs.set-environment.outputs.key_vault_url != ''
+        env:
+          KV_URL: ${{ needs.set-environment.outputs.key_vault_url }}
+          DEPLOY_ENV: ${{ needs.set-environment.outputs.deploy_env }}
+          FALLBACK_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
         run: |
-          KV_URL="${ needs.set-environment.outputs.key_vault_url }"
-          ENV="${ needs.set-environment.outputs.deploy_env }"
-          SECRET_NAME="clientid-mcp-reddit-${{ENV}}"
+          export SECRET_NAME="clientid-mcp-reddit-${DEPLOY_ENV}"
+          CLIENT_ID=$(python3 <<'PYEOF'
+import os
+from azure.identity import DefaultAzureCredential
+from azure.keyvault.secrets import SecretClient
 
-          # Bootstrap login with GitHub environment secret to access Key Vault.
-          az login --service-principal \
-            --username "${{ secrets.AZURE_CLIENT_ID }}" \
-            --federated-token "$(curl -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api://AzureADTokenExchange" | python3 -c "import sys,json; print(json.load(sys.stdin)['value'])")" \
-            --tenant "${{ secrets.AZURE_TENANT_ID }}" 2>/dev/null || true
-
-          CLIENT_ID=$(az keyvault secret show \
-            --vault-name "$(echo "$KV_URL" | sed 's|https://||; s|\.vault\.azure\.net.*||')" \
-            --name "$SECRET_NAME" \
-            --query value -o tsv 2>/dev/null || echo "")
+try:
+    cred = DefaultAzureCredential()
+    secret = SecretClient(vault_url=os.environ["KV_URL"], credential=cred).get_secret(os.environ["SECRET_NAME"])
+    print(secret.value)
+except Exception:
+    pass
+PYEOF
+          )
 
           if [[ -n "$CLIENT_ID" ]]; then
-            echo "client_id=${{CLIENT_ID}}" >> "$GITHUB_OUTPUT"
-            echo "  ✅ Retrieved AZURE_CLIENT_ID from Key Vault (secret: ${{SECRET_NAME}})"
+            echo "client_id=${CLIENT_ID}" >> "$GITHUB_OUTPUT"
+            echo "  ✅ Retrieved AZURE_CLIENT_ID from Key Vault (secret: ${SECRET_NAME})"
           else
-            echo "client_id=${{ secrets.AZURE_CLIENT_ID }}" >> "$GITHUB_OUTPUT"
+            echo "client_id=${FALLBACK_CLIENT_ID}" >> "$GITHUB_OUTPUT"
             echo "  ⚠️  Secret not found in Key Vault; falling back to GitHub environment secret"
           fi
 
@@ -330,14 +396,26 @@ jobs:
         id: resolve
         env:
           DEPLOY_ENV: ${{ needs.set-environment.outputs.deploy_env }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
           APP_NAME: mcp-reddit
         run: |
           RESOURCE_GROUP="${{ vars.AZURE_RESOURCE_GROUP || format('rg-aos-{0}', env.DEPLOY_ENV) }}"
-          PREFIX="func-${APP_NAME}-${DEPLOY_ENV}-"
-          FUNCTION_APP=$(az functionapp list \
-            --resource-group "$RESOURCE_GROUP" \
-            --query "[?starts_with(name, '${PREFIX}')].name | [0]" \
-            --output tsv 2>/dev/null)
+          export PREFIX="func-${APP_NAME}-${DEPLOY_ENV}-"
+          export RESOURCE_GROUP
+
+          FUNCTION_APP=$(python3 <<'PYEOF'
+import os, sys
+from azure.identity import DefaultAzureCredential
+from azure.mgmt.web import WebSiteManagementClient
+cred = DefaultAzureCredential()
+client = WebSiteManagementClient(cred, os.environ["AZURE_SUBSCRIPTION_ID"])
+for app in client.web_apps.list_by_resource_group(os.environ["RESOURCE_GROUP"]):
+    if (app.name or "").startswith(os.environ["PREFIX"]):
+        print(app.name)
+        sys.exit(0)
+sys.exit(1)
+PYEOF
+          )
           if [[ -z "$FUNCTION_APP" ]]; then
             echo "❌ No Function App found with prefix '${PREFIX}' in resource group '${RESOURCE_GROUP}'"
             exit 1
@@ -375,34 +453,47 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
+          pip install --quiet azure-identity azure-keyvault-secrets azure-mgmt-web
           if [[ -f requirements.txt ]]; then
             pip install --target=".python_packages/lib/site-packages" -r requirements.txt
           fi
 
+      - name: Azure Login (OIDC) — bootstrap for Key Vault access
+        if: needs.set-environment.outputs.key_vault_url != ''
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
       - name: Retrieve AZURE_CLIENT_ID from Key Vault
         id: kv_client_id
         if: needs.set-environment.outputs.key_vault_url != ''
+        env:
+          KV_URL: ${{ needs.set-environment.outputs.key_vault_url }}
+          DEPLOY_ENV: ${{ needs.set-environment.outputs.deploy_env }}
+          FALLBACK_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
         run: |
-          KV_URL="${ needs.set-environment.outputs.key_vault_url }"
-          ENV="${ needs.set-environment.outputs.deploy_env }"
-          SECRET_NAME="clientid-mcp-subconscious-${{ENV}}"
+          export SECRET_NAME="clientid-mcp-subconscious-${DEPLOY_ENV}"
+          CLIENT_ID=$(python3 <<'PYEOF'
+import os
+from azure.identity import DefaultAzureCredential
+from azure.keyvault.secrets import SecretClient
 
-          # Bootstrap login with GitHub environment secret to access Key Vault.
-          az login --service-principal \
-            --username "${{ secrets.AZURE_CLIENT_ID }}" \
-            --federated-token "$(curl -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api://AzureADTokenExchange" | python3 -c "import sys,json; print(json.load(sys.stdin)['value'])")" \
-            --tenant "${{ secrets.AZURE_TENANT_ID }}" 2>/dev/null || true
-
-          CLIENT_ID=$(az keyvault secret show \
-            --vault-name "$(echo "$KV_URL" | sed 's|https://||; s|\.vault\.azure\.net.*||')" \
-            --name "$SECRET_NAME" \
-            --query value -o tsv 2>/dev/null || echo "")
+try:
+    cred = DefaultAzureCredential()
+    secret = SecretClient(vault_url=os.environ["KV_URL"], credential=cred).get_secret(os.environ["SECRET_NAME"])
+    print(secret.value)
+except Exception:
+    pass
+PYEOF
+          )
 
           if [[ -n "$CLIENT_ID" ]]; then
-            echo "client_id=${{CLIENT_ID}}" >> "$GITHUB_OUTPUT"
-            echo "  ✅ Retrieved AZURE_CLIENT_ID from Key Vault (secret: ${{SECRET_NAME}})"
+            echo "client_id=${CLIENT_ID}" >> "$GITHUB_OUTPUT"
+            echo "  ✅ Retrieved AZURE_CLIENT_ID from Key Vault (secret: ${SECRET_NAME})"
           else
-            echo "client_id=${{ secrets.AZURE_CLIENT_ID }}" >> "$GITHUB_OUTPUT"
+            echo "client_id=${FALLBACK_CLIENT_ID}" >> "$GITHUB_OUTPUT"
             echo "  ⚠️  Secret not found in Key Vault; falling back to GitHub environment secret"
           fi
 
@@ -417,14 +508,26 @@ jobs:
         id: resolve
         env:
           DEPLOY_ENV: ${{ needs.set-environment.outputs.deploy_env }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
           APP_NAME: mcp-subconscious
         run: |
           RESOURCE_GROUP="${{ vars.AZURE_RESOURCE_GROUP || format('rg-aos-{0}', env.DEPLOY_ENV) }}"
-          PREFIX="func-${APP_NAME}-${DEPLOY_ENV}-"
-          FUNCTION_APP=$(az functionapp list \
-            --resource-group "$RESOURCE_GROUP" \
-            --query "[?starts_with(name, '${PREFIX}')].name | [0]" \
-            --output tsv 2>/dev/null)
+          export PREFIX="func-${APP_NAME}-${DEPLOY_ENV}-"
+          export RESOURCE_GROUP
+
+          FUNCTION_APP=$(python3 <<'PYEOF'
+import os, sys
+from azure.identity import DefaultAzureCredential
+from azure.mgmt.web import WebSiteManagementClient
+cred = DefaultAzureCredential()
+client = WebSiteManagementClient(cred, os.environ["AZURE_SUBSCRIPTION_ID"])
+for app in client.web_apps.list_by_resource_group(os.environ["RESOURCE_GROUP"]):
+    if (app.name or "").startswith(os.environ["PREFIX"]):
+        print(app.name)
+        sys.exit(0)
+sys.exit(1)
+PYEOF
+          )
           if [[ -z "$FUNCTION_APP" ]]; then
             echo "❌ No Function App found with prefix '${PREFIX}' in resource group '${RESOURCE_GROUP}'"
             exit 1

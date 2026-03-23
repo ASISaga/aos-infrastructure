@@ -13,12 +13,13 @@ even when the SDK is not installed.
 
 from __future__ import annotations
 
-import json
 import logging
-import subprocess
-import sys
 from dataclasses import dataclass, field
 from typing import Any, Optional
+
+from azure.identity import DefaultAzureCredential  # type: ignore[import]
+from azure.mgmt.web import WebSiteManagementClient  # type: ignore[import]
+from azure.mgmt.web.models import StringDictionary  # type: ignore[import]
 
 logger = logging.getLogger(__name__)
 
@@ -199,49 +200,37 @@ class SDKBridge:
         (``func-agent-operating-system-{environment}-*``) because the full name includes
         a unique suffix derived from the resource group ID at deploy time.
         """
-        result = subprocess.run(  # noqa: S603
-            [
-                "az", "functionapp", "list",
-                "--resource-group", self.resource_group,
-                "--query", f"[?starts_with(name, 'func-agent-operating-system-{self.environment}-')].defaultHostName | [0]",
-                "--output", "tsv",
-            ],
-            capture_output=True, text=True,
-        )
-        if result.returncode != 0 or not result.stdout.strip():
-            return None
-        hostname = result.stdout.strip()
-        return f"https://{hostname}"
+        prefix = f"func-agent-operating-system-{self.environment}-"
+        try:
+            credential = DefaultAzureCredential()
+            client = WebSiteManagementClient(credential, self.subscription_id)
+            for app in client.web_apps.list_by_resource_group(self.resource_group):
+                if (app.name or "").startswith(prefix):
+                    hostname = app.default_host_name
+                    return f"https://{hostname}" if hostname else None
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.warning("Could not resolve AOS endpoint: %s", exc)
+        return None
 
     def get_function_app_status(self, app_name: str) -> AppDeploymentStatus:
         """Retrieve the current deployment status of a Function App from Azure."""
-        result = subprocess.run(  # noqa: S603
-            [
-                "az", "functionapp", "show",
-                "--resource-group", self.resource_group,
-                "--name", app_name,
-                "--query", "{state:state, url:defaultHostName}",
-                "--output", "json",
-            ],
-            capture_output=True, text=True,
-        )
-        if result.returncode != 0:
-            return AppDeploymentStatus(
-                app_name=app_name,
-                status="unknown",
-                error=result.stderr.strip(),
-            )
         try:
-            data = json.loads(result.stdout)
-            state = data.get("state", "unknown")
-            hostname = data.get("url")
+            credential = DefaultAzureCredential()
+            client = WebSiteManagementClient(credential, self.subscription_id)
+            app = client.web_apps.get(self.resource_group, app_name)
+            state = app.state or "unknown"
+            hostname = app.default_host_name
             return AppDeploymentStatus(
                 app_name=app_name,
                 status="running" if state == "Running" else state.lower(),
                 url=f"https://{hostname}" if hostname else None,
             )
-        except json.JSONDecodeError:
-            return AppDeploymentStatus(app_name=app_name, status="unknown")
+        except Exception as exc:  # pylint: disable=broad-except
+            return AppDeploymentStatus(
+                app_name=app_name,
+                status="unknown",
+                error=str(exc),
+            )
 
     def sync_app_settings(
         self,
@@ -259,18 +248,16 @@ class SDKBridge:
         """
         if not settings:
             return True
-        setting_args = [f"{k}={v}" for k, v in settings.items()]
-        result = subprocess.run(  # noqa: S603
-            [
-                "az", "functionapp", "config", "appsettings", "set",
-                "--resource-group", self.resource_group,
-                "--name", app_name,
-                "--settings", *setting_args,
-                "--output", "json",
-            ],
-            capture_output=True, text=True,
-        )
-        ok = result.returncode == 0
-        icon = "✅" if ok else "❌"
-        print(f"  {icon} App settings for '{app_name}': {'updated' if ok else result.stderr.strip()}")
-        return ok
+
+        try:
+            credential = DefaultAzureCredential()
+            client = WebSiteManagementClient(credential, self.subscription_id)
+            settings_dict = StringDictionary(properties=settings)
+            client.web_apps.update_application_settings(
+                self.resource_group, app_name, settings_dict
+            )
+            print(f"  ✅ App settings for '{app_name}': updated")
+            return True
+        except Exception as exc:  # pylint: disable=broad-except
+            print(f"  ❌ App settings for '{app_name}': {exc}")
+            return False

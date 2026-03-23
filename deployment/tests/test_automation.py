@@ -448,54 +448,58 @@ class TestSDKBridge:
         assert s.url is None
         assert s.error is None
 
-    @mock.patch("subprocess.run")
+    @mock.patch("orchestrator.integration.sdk_bridge.DefaultAzureCredential")
+    @mock.patch("orchestrator.integration.sdk_bridge.WebSiteManagementClient")
     def test_get_function_app_status_not_found(
-        self, mock_run: mock.Mock, bridge: SDKBridge
+        self, mock_web_client: mock.Mock, mock_cred: mock.Mock, bridge: SDKBridge
     ) -> None:
-        mock_run.return_value = subprocess.CompletedProcess([], 1, "", "Not found")
+        mock_web_client.return_value.web_apps.get.side_effect = Exception("Not found")
         status = bridge.get_function_app_status("nonexistent-app")
         assert status.status == "unknown"
 
-    @mock.patch("subprocess.run")
+    @mock.patch("orchestrator.integration.sdk_bridge.DefaultAzureCredential")
+    @mock.patch("orchestrator.integration.sdk_bridge.WebSiteManagementClient")
     def test_get_function_app_status_running(
-        self, mock_run: mock.Mock, bridge: SDKBridge
+        self, mock_web_client: mock.Mock, mock_cred: mock.Mock, bridge: SDKBridge
     ) -> None:
-        mock_run.return_value = subprocess.CompletedProcess(
-            [], 0, json.dumps({"state": "Running", "url": "my-app.azurewebsites.net"}), ""
-        )
+        mock_app = mock.MagicMock()
+        mock_app.state = "Running"
+        mock_app.default_host_name = "my-app.azurewebsites.net"
+        mock_web_client.return_value.web_apps.get.return_value = mock_app
         status = bridge.get_function_app_status("my-app")
         assert status.status == "running"
         assert status.url == "https://my-app.azurewebsites.net"
 
-    @mock.patch("subprocess.run")
+    @mock.patch("orchestrator.integration.sdk_bridge.DefaultAzureCredential")
+    @mock.patch("orchestrator.integration.sdk_bridge.WebSiteManagementClient")
     def test_sync_app_settings_success(
-        self, mock_run: mock.Mock, bridge: SDKBridge
+        self, mock_web_client: mock.Mock, mock_cred: mock.Mock, bridge: SDKBridge
     ) -> None:
-        mock_run.return_value = subprocess.CompletedProcess([], 0, "[]", "")
+        mock_web_client.return_value.web_apps.update_application_settings.return_value = None
         ok = bridge.sync_app_settings("my-app", {"KEY": "value"})
         assert ok is True
 
-    @mock.patch("subprocess.run")
     def test_sync_app_settings_empty_is_noop(
-        self, mock_run: mock.Mock, bridge: SDKBridge
+        self, bridge: SDKBridge
     ) -> None:
         ok = bridge.sync_app_settings("my-app", {})
         assert ok is True
-        mock_run.assert_not_called()
 
-    @mock.patch("subprocess.run")
-    def test_get_aos_endpoint(self, mock_run: mock.Mock, bridge: SDKBridge) -> None:
-        mock_run.return_value = subprocess.CompletedProcess(
-            [], 0, "func-agent-operating-system-dev-abc123.azurewebsites.net\n", ""
-        )
+    @mock.patch("orchestrator.integration.sdk_bridge.DefaultAzureCredential")
+    @mock.patch("orchestrator.integration.sdk_bridge.WebSiteManagementClient")
+    def test_get_aos_endpoint(
+        self, mock_web_client: mock.Mock, mock_cred: mock.Mock, bridge: SDKBridge
+    ) -> None:
+        mock_app = mock.MagicMock()
+        mock_app.name = "func-agent-operating-system-dev-abc123"
+        mock_app.default_host_name = "func-agent-operating-system-dev-abc123.azurewebsites.net"
+        mock_web_client.return_value.web_apps.list_by_resource_group.return_value = [mock_app]
         endpoint = bridge.get_aos_endpoint()
         assert endpoint == "https://func-agent-operating-system-dev-abc123.azurewebsites.net"
-        # Verify the command uses `functionapp list` with a prefix filter (not `functionapp show`
-        # with an exact name) because the real name includes a unique suffix.
-        cmd = mock_run.call_args[0][0]
-        assert "list" in cmd
-        assert "starts_with" in " ".join(cmd)
-        assert "func-agent-operating-system-dev-" in " ".join(cmd)
+        # Verify the SDK was called with the right resource group
+        mock_web_client.return_value.web_apps.list_by_resource_group.assert_called_once_with(
+            bridge.resource_group
+        )
 
     def test_default_app_names_includes_mcp_servers(self) -> None:
         """All four MCP server submodules must be present in the default app names list."""
