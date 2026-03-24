@@ -1,102 +1,106 @@
 # GitHub Actions Workflows
 
-**Last Updated**: 2026-03-17  
+**Last Updated**: 2026-03-24  
 **Audience**: Platform engineers, DevOps, contributors
 
-This document describes the five GitHub Actions workflows that automate the infrastructure lifecycle for `aos-infrastructure`, and the Python `workflow_helper` CLI that supports them.
+This document describes the eight GitHub Actions workflows that automate the infrastructure and code deployment lifecycle for the AOS platform.
 
 ---
 
 ## Workflow Overview
 
 | Workflow file | Name | Trigger | Purpose |
-|---------------|------|---------|---------|
-| `infrastructure-deploy.yml` | Infrastructure Deployment Agent | `workflow_dispatch`, PR label, issue comment | Full deployment pipeline: lint → validate → what-if → deploy |
+|---|---|---|---|
+| `infrastructure-deploy.yml` | Infrastructure Deployment | `workflow_dispatch`, PR label, issue comment | 5-phase Bicep deployment with OODA gating |
 | `infrastructure-governance.yml` | Infrastructure Governance | Daily 06:00 UTC, `workflow_dispatch` | Policy compliance, cost/budget, RBAC review |
-| `infrastructure-drift-detection.yml` | Infrastructure Drift Detection | Every 6 hours, `workflow_dispatch` | Drift vs. Bicep template, SLA compliance, DR readiness |
-| `infrastructure-monitoring.yml` | Infrastructure Monitoring | Every 6 hours, `workflow_dispatch` | Health, performance, cost, security posture checks |
-| `infrastructure-troubleshooting.yml` | Infrastructure Troubleshooting | `workflow_dispatch` | Diagnostics collection and failure analysis |
+| `infrastructure-drift-detection.yml` | Infrastructure Drift Detection | Every 6 hours, `workflow_dispatch` | Drift vs. Bicep template, DR readiness |
+| `infrastructure-troubleshooting.yml` | Infrastructure Troubleshooting | `workflow_dispatch` | Diagnostics and autonomous error fixing |
+| `cost-management.yml` | Cost Management | `workflow_dispatch` | Cost audit, scale-down violations, GitHub issue creation |
+| `deploy-function-app.yml` | Deploy Function App _(reusable)_ | `workflow_call` from code repos | Deploy Python Function App via OIDC |
+| `deploy-foundry-agent.yml` | Deploy Foundry Agent _(reusable)_ | `workflow_call` from agent repos | Deploy agent to Azure AI Foundry Agent Service |
+| `copilot-setup-steps.yml` | Copilot Setup Steps | `workflow_dispatch`, push | Configure GitHub Copilot Agent environment |
 
-Required GitHub secrets for all workflows:
+Required GitHub secrets (all infrastructure workflows):
 
 | Secret | Description |
-|--------|-------------|
+|---|---|
 | `AZURE_CLIENT_ID` | OIDC application (client) ID |
 | `AZURE_TENANT_ID` | Azure Active Directory tenant ID |
 | `AZURE_SUBSCRIPTION_ID` | Target Azure subscription ID |
 
 ---
 
-## 1. Infrastructure Deployment Agent
+## 1. Infrastructure Deployment
 
 **File**: `.github/workflows/infrastructure-deploy.yml`
+
+The primary infrastructure deployment workflow. Runs five sequential Bicep phases with OODA-loop cost gating and automatic dispatch to code repositories.
 
 ### Triggers
 
 | Event | Conditions | Behaviour |
-|-------|-----------|-----------|
-| `workflow_dispatch` | Manual | Full deploy to the selected environment |
+|---|---|---|
+| `workflow_dispatch` | Manual | Full deploy to selected environment |
 | `pull_request` (labeled) | Paths: `deployment/**` | See label table below |
-| `issue_comment` (created) | `/deploy` command in body | Deploy from a comment |
+| `issue_comment` (created) | `/deploy` in body | Deploy from comment |
 
-**PR label rules**:
+**PR label rules:**
 
 | Label | Effect |
-|-------|--------|
+|---|---|
 | `deploy:dev` | Dry-run plan to `dev` |
 | `deploy:staging` + `status:approved` | Live deploy to `staging` |
 | `action:deploy` | Live deploy using input defaults |
 
-**Issue comment commands**:
-
-```
-/deploy           → deploy to dev (default)
-/deploy prod      → deploy to prod
-/deploy plan      → dry-run (plan only)
-```
-
 ### Inputs (`workflow_dispatch`)
 
 | Input | Required | Default | Description |
-|-------|----------|---------|-------------|
+|---|---|---|---|
 | `environment` | ✅ | — | `dev`, `staging`, or `prod` |
-| `resource_group` | ❌ | auto (`rg-aos-<env>`) | Azure resource group |
+| `resource_group` | ❌ | `rg-aos-<env>` | Azure resource group |
 | `location` | ❌ | auto-selected | Primary Azure region |
 | `geography` | ❌ | `''` | `americas`, `europe`, or `asia` |
 | `template` | ❌ | `deployment/main-modular.bicep` | Bicep template path |
+| `dry_run` | ❌ | `false` | Plan only (lint → validate → what-if, no deploy) |
 | `skip_health_checks` | ❌ | `false` | Skip post-deployment health checks |
+| `deploy_function_apps` | ❌ | `false` | Also deploy Function App code via SDK bridge |
+| `sync_kernel_config` | ❌ | `false` | Sync aos-kernel env vars to all Function Apps |
 
 ### Jobs
 
 ```
-setup ──► deploy
+validate ──► deploy
 ```
 
-**`setup`** — Evaluates the trigger (label, comment, or dispatch) and emits deployment parameters as step outputs.
+**`validate`** — Lints Bicep template; emits environment, resource_group, parameters_file, is_dry_run as outputs.
 
-**`deploy`** — Orchestrates the full deployment:
+**`deploy`** — Full deployment pipeline:
 
-1. Posts a "started" comment on the PR/issue
-2. Installs Python dependencies and Azure CLI
-3. Authenticates to Azure via OIDC (`azure/login@v2`)
-4. Calls `workflow_helper.py select-regions` to pick primary and ML regions
-5. Validates regional capabilities via `regional_tool.py`
-6. Runs `deployment/deploy.py plan` (dry-run) or `deploy` (live)
-7. Calls `workflow_helper.py analyze-output` to classify success/failure
-8. On **logic error**: invokes the `deployment-error-fixer` skill to auto-fix and retry
-9. On **transient error**: calls `workflow_helper.py retry` (up to 3 attempts, exponential back-off)
-10. Extracts deployment summary from audit JSON
-11. Posts a result comment on the PR/issue
-12. Uploads audit logs as artifacts (90-day retention)
+1. Auto-select Azure regions via `workflow_helper.py select-regions`
+2. Ensure resource group exists
+3. Lint Bicep template
+4. Validate ARM template
+5. What-if analysis (informational; continue-on-error)
+6. **Phase 1**: Foundation — monitoring, storage, serviceBus, keyVault
+7. **Phase 2**: AI Services — aiServices, aiHub, aiProject (requires Phase 1)
+8. **Phase 3**: AI Applications — loraInference, foundryApps, aiGateway, a2aConnections (requires Phase 2)
+9. **Phase 4**: Function Apps — functionApps, mcpServerFunctionApps (requires Phase 1)
+10. **Store client IDs**: Fetch managed identity clientIds via `ManagedIdentityClient`; store in Key Vault
+11. **Phase 5**: Governance — policy assignments, cost budget (independent)
+12. **Signal code repositories**: Dispatch `infra_provisioned` to 8 code repos (requires `DEPLOY_DISPATCH_TOKEN`)
+13. Post-deploy health check
+14. Upload audit logs (90-day retention)
 
-### Permissions
+**Bicep phase gating**: Each phase gates on `steps.arm_validate.outcome == 'success'` (NOT what-if outcome — what-if is informational only).
 
-```yaml
-id-token: write   # OIDC login
-contents: read
-pull-requests: write
-issues: write
-```
+### Post-Deployment Dispatch
+
+After Phase 4, an `infra_provisioned` `repository_dispatch` event is sent to:
+`agent-operating-system`, `aos-realm-of-agents`, `business-infinity`, `mcp`, `erpnext.asisaga.com`, `linkedin.asisaga.com`, `reddit.asisaga.com`, `subconscious.asisaga.com`
+
+**Payload**: `{ environment, resource_group, key_vault_url, infra_sha, infra_run_id }`
+
+Requires `DEPLOY_DISPATCH_TOKEN` secret (GitHub PAT with `repo` scope).
 
 ---
 
@@ -112,7 +116,7 @@ issues: write
 ### Inputs
 
 | Input | Default | Description |
-|-------|---------|-------------|
+|---|---|---|
 | `environment` | `dev` | Target environment |
 | `resource_group` | `rg-aos-<env>` | Resource group |
 | `enforce_policies` | `false` | Assign AOS governance policies |
@@ -120,16 +124,14 @@ issues: write
 | `review_rbac` | `true` | Run privileged-access review |
 | `required_tags` | `''` | Comma-separated `key=value` tag pairs to enforce |
 
-### Job: `governance`
+### Steps
 
-Steps executed in order:
-
-1. **Policy compliance evaluation** — `PolicyManager.evaluate_compliance()`: lists non-compliant resources and emits GitHub workflow warnings.
-2. **Required tag enforcement** *(optional)* — `PolicyManager.enforce_required_tags()`: warns on resources missing required tags.
-3. **Budget status check** *(optional)* — `CostManager.check_budget_alerts()`: warns when budget thresholds are breached.
-4. **Privileged access review** *(optional)* — `RbacManager.review_privileged_access()`: lists over-privileged principals with recommendations.
-5. **Assign AOS governance policies** *(optional)* — `PolicyManager.assign_aos_policies()`: assigns standard AOS policy set.
-6. **Governance summary** — writes a Markdown table to `$GITHUB_STEP_SUMMARY`.
+1. **Policy compliance evaluation** — `PolicyManager.evaluate_compliance()`: warns on non-compliant resources
+2. **Required tag enforcement** *(optional)* — warns on resources missing required tags
+3. **Budget status check** *(optional)* — `CostManager.check_budget_alerts()`: warns on threshold breaches
+4. **Privileged access review** *(optional)* — `RbacManager.review_privileged_access()`: lists over-privileged principals
+5. **Assign governance policies** *(optional)* — `PolicyManager.assign_aos_policies()`: assigns standard AOS policy set
+6. **Governance summary** — Markdown table to `$GITHUB_STEP_SUMMARY`
 
 ---
 
@@ -145,64 +147,24 @@ Steps executed in order:
 ### Inputs
 
 | Input | Default | Description |
-|-------|---------|-------------|
+|---|---|---|
 | `environment` | `dev` | Target environment |
 | `resource_group` | `rg-aos-<env>` | Resource group |
 | `template` | `deployment/main-modular.bicep` | Bicep template to compare against |
 | `parameters_file` | `''` | Optional `.bicepparam` file |
-| `check_dr_readiness` | `true` | Assess DR readiness (soft-delete, geo-replication) |
-| `fail_on_drift` | `false` | Fail the workflow when drift is detected |
+| `check_dr_readiness` | `true` | Assess DR readiness |
 
-### Job: `drift-detection`
+### Steps
 
-1. **Snapshot live state** — `DriftDetector.snapshot_state()`: records current Azure resource state.
-2. **Detect infrastructure drift** — `DriftDetector.detect_drift()`: compares live state against the Bicep template; categorises findings as `missing`, `unexpected`, or `changed`.
-3. **SLA compliance check** — `HealthMonitor.check_sla_compliance()`: warns when observed uptime falls below the environment SLA target.
-4. **DR readiness assessment** *(optional)* — `HealthMonitor.check_disaster_recovery_readiness()`: checks Key Vault soft-delete and storage geo-replication.
-5. **Upload drift findings** — saves `drift-findings.json` as a workflow artifact.
-6. **Drift detection summary** — writes a Markdown table to `$GITHUB_STEP_SUMMARY`.
+1. Detect drift — `DriftDetector.detect_drift()`: categorises findings as `missing`, `unexpected`, or `changed`
+2. SLA compliance check — `HealthMonitor.check_sla_compliance()`
+3. DR readiness assessment *(optional)* — checks Key Vault soft-delete and storage geo-replication
+4. Upload `drift-findings.json` artifact
+5. Drift detection summary to `$GITHUB_STEP_SUMMARY`
 
 ---
 
-## 4. Infrastructure Monitoring
-
-**File**: `.github/workflows/infrastructure-monitoring.yml`
-
-### Triggers
-
-- **Scheduled**: every 6 hours (`0 */6 * * *`)
-- **Manual**: `workflow_dispatch`
-
-### Inputs
-
-| Input | Default | Description |
-|-------|---------|-------------|
-| `environment` | — | `dev`, `staging`, `prod`, or `all` |
-| `check_type` | `all` | `all`, `health`, `performance`, `cost`, or `security` |
-
-### Jobs (matrix over environments)
-
-```
-setup ──► health-check
-       ──► performance-metrics
-       ──► cost-monitoring
-       ──► security-posture
-       └──► monitoring-summary (always)
-```
-
-| Job | Checks |
-|-----|--------|
-| **health-check** | Function Apps (state + HTTP reachability), Storage Accounts, Service Bus namespaces, Application Insights |
-| **performance-metrics** | Function App request count, average response time (last 1 hour) |
-| **cost-monitoring** | Lists resources; links to Azure Cost Management for detail |
-| **security-posture** | Key Vault soft-delete + purge-protection; Storage Account HTTPS-only |
-| **monitoring-summary** | Aggregates all results; creates a GitHub issue when health/performance/security checks fail |
-
-Each job uploads an artifact report (90-day retention).
-
----
-
-## 5. Infrastructure Troubleshooting
+## 4. Infrastructure Troubleshooting
 
 **File**: `.github/workflows/infrastructure-troubleshooting.yml`
 
@@ -213,30 +175,163 @@ Each job uploads an artifact report (90-day retention).
 ### Inputs
 
 | Input | Required | Description |
-|-------|----------|-------------|
+|---|---|---|
 | `environment` | ✅ | `dev`, `staging`, or `prod` |
 | `issue_type` | ✅ | `deployment_failure`, `performance_degradation`, `connectivity_issue`, `resource_error`, `custom_diagnostic` |
 | `resource_name` | ❌ | Specific resource to target |
-| `description` | ❌ | Free-text description of the issue |
+| `description` | ❌ | Free-text description |
 
 ### Jobs
 
 ```
-collect-diagnostics ──► analyze-deployment-failure   (if issue_type == deployment_failure)
-                    ──► diagnose-performance          (if issue_type == performance_degradation)
-                    ──► diagnose-connectivity         (if issue_type == connectivity_issue)
-                    ──► diagnose-resource-error       (if issue_type == resource_error)
+collect-diagnostics ──► analyze-deployment-failure   (deployment_failure)
+                    ──► diagnose-performance          (performance_degradation)
+                    ──► diagnose-connectivity         (connectivity_issue)
+                    ──► diagnose-resource-error       (resource_error)
                     └──► generate-report              (always)
 ```
 
-| Job | What it does |
-|-----|-------------|
-| **collect-diagnostics** | Resource group details, all resources, recent deployments, activity log (errors/warnings, last 24 h) |
-| **analyze-deployment-failure** | Failed deployment details, failed operations, VM quota status, recommendations |
-| **diagnose-performance** | Function App request count, response time, HTTP 5xx errors (last 4 h) |
-| **diagnose-connectivity** | Function App and Service Bus reachability tests |
-| **diagnose-resource-error** | Resource health status, specific resource details |
-| **generate-report** | Combines all diagnostics into a single troubleshooting report artifact |
+Uses `azure_ops.py` subcommands (Azure SDK; no `az` CLI calls) for all diagnostics. On logic errors, invokes the `deployment-error-fixer` skill to auto-fix and retry.
+
+---
+
+## 5. Cost Management
+
+**File**: `.github/workflows/cost-management.yml`
+
+### Triggers
+
+- **Manual**: `workflow_dispatch`
+
+### Inputs
+
+| Input | Default | Description |
+|---|---|---|
+| `environment` | required | `dev`, `staging`, or `prod` |
+| `resource_group` | `rg-aos-<env>` | Resource group |
+| `create_issue` | `true` | Create GitHub issue on findings |
+| `cost_period_days` | `30` | Look-back period in days |
+
+### Steps
+
+1. **Cost audit** — `CostManager.get_current_spend(period_days)`: queries 30-day spend
+2. **Scale-down audit** — `ScaleDownAuditor`: identifies resources not scaled to zero in non-prod
+3. **GitHub issue creation** *(optional)* — creates issue with cost findings and recommendations
+4. **Cost summary** — Markdown report to `$GITHUB_STEP_SUMMARY`
+
+---
+
+## 6. Deploy Function App _(Reusable)_
+
+**File**: `.github/workflows/deploy-function-app.yml`  
+**Trigger**: `workflow_call` (called by code repositories via `uses:`)
+
+This centralised reusable workflow deploys any Python Azure Function App via OIDC Workload Identity Federation. All 8 Function App repositories call this workflow instead of duplicating deployment logic.
+
+### Inputs
+
+| Input | Required | Description |
+|---|---|---|
+| `app-name` | ✅ | Azure-safe app name (e.g. `agent-operating-system`) |
+| `environment` | ✅ | `dev`, `staging`, or `prod` |
+| `key-vault-url` | ❌ | Key Vault URL for first-run AZURE_CLIENT_ID retrieval |
+| `python-version` | ❌ | Python version (default: `3.11`) |
+| `azure-resource-group` | ❌ | Resource group override (default: `rg-aos-<env>`) |
+
+### Secrets (via `secrets: inherit`)
+
+| Secret | Source |
+|---|---|
+| `AZURE_CLIENT_ID` | Calling repo's GitHub Environment |
+| `AZURE_TENANT_ID` | Calling repo's GitHub Environment |
+| `AZURE_SUBSCRIPTION_ID` | Calling repo's GitHub Environment |
+
+### Steps
+
+1. Checkout caller's code
+2. Install Python + Azure SDK deps (`azure-identity`, `azure-keyvault-secrets`, `azure-mgmt-web`)
+3. *(Optional)* OIDC login with bootstrap credential to retrieve `AZURE_CLIENT_ID` from Key Vault
+4. OIDC login with app-specific managed identity
+5. Resolve exact Function App name by prefix via `azure-mgmt-web` (`WebSiteManagementClient`)
+6. Deploy via `azure/functions-action@v1` (zip upload to pre-configured blob storage container)
+
+**Called from** (all use `secrets: inherit`):
+- `agent-operating-system/deploy.yml`
+- `aos-realm-of-agents/deploy.yml`
+- `business-infinity/deploy.yml`
+- `mcp/deploy.yml` (×4 in parallel for each MCP server)
+- `erpnext.asisaga.com/deploy.yml`
+- `linkedin.asisaga.com/deploy.yml`
+- `reddit.asisaga.com/deploy.yml`
+- `subconscious.asisaga.com/deploy.yml`
+
+---
+
+## 7. Deploy Foundry Agent _(Reusable)_
+
+**File**: `.github/workflows/deploy-foundry-agent.yml`  
+**Trigger**: `workflow_call` (called by agent repositories via `uses:`)
+
+This centralised reusable workflow deploys an agent definition to Azure AI Foundry Agent Service. All 5 C-suite agent repositories call this workflow.
+
+The calling repository must contain an `agent.yaml` at the root:
+
+```yaml
+name: "CEO Agent"
+model: "gpt-4o"
+instructions: |
+  You are the CEO agent responsible for strategic decision-making...
+tools:
+  - type: code_interpreter
+  - type: file_search
+metadata:
+  version: "1.0"
+```
+
+### Inputs
+
+| Input | Required | Description |
+|---|---|---|
+| `agent-name` | ✅ | Agent identifier (e.g. `ceo-agent`) |
+| `environment` | ✅ | `dev`, `staging`, or `prod` |
+| `foundry-project-endpoint` | ❌ | Foundry project endpoint URL (overrides `FOUNDRY_PROJECT_ENDPOINT` secret) |
+| `azure-resource-group` | ❌ | Resource group override |
+| `python-version` | ❌ | Python version (default: `3.11`) |
+
+### Secrets (via `secrets: inherit`)
+
+| Secret | Source |
+|---|---|
+| `AZURE_CLIENT_ID` | Calling repo's GitHub Environment |
+| `AZURE_TENANT_ID` | Calling repo's GitHub Environment |
+| `AZURE_SUBSCRIPTION_ID` | Calling repo's GitHub Environment |
+| `FOUNDRY_PROJECT_ENDPOINT` | Calling repo's GitHub Environment _(optional if input provided)_ |
+
+### Steps
+
+1. Checkout caller's code
+2. Install `azure-ai-projects>=1.0.0b4`, `pyyaml`
+3. OIDC login
+4. Resolve Foundry project endpoint (input → secret → auto-discovery from resource group)
+5. Parse `agent.yaml` (or `agent.yml` / `agent.json`)
+6. `AIProjectClient.agents.list_agents()` — check for existing agent by name
+7. `create_agent()` or `update_agent()` depending on whether it already exists
+
+**Called from** (all use `secrets: inherit`):
+- `ceo-agent/deploy.yml`
+- `cfo-agent/deploy.yml`
+- `cto-agent/deploy.yml`
+- `cso-agent/deploy.yml`
+- `cmo-agent/deploy.yml`
+
+---
+
+## 8. Copilot Setup Steps
+
+**File**: `.github/workflows/copilot-setup-steps.yml`  
+**Trigger**: `workflow_dispatch`, push
+
+Configures the GitHub Copilot Agent environment with the `gh-aw` MCP server extension for infrastructure-aware agent assistance.
 
 ---
 
@@ -244,107 +339,24 @@ collect-diagnostics ──► analyze-deployment-failure   (if issue_type == dep
 
 **Path**: `deployment/orchestrator/cli/workflow_helper.py`
 
-A pure-Python CLI tool used by the deployment workflow to perform complex logic that would be impractical in shell scripts. It writes results to `$GITHUB_OUTPUT` (GitHub Actions) or to stdout for local use.
+A pure-Python CLI tool used by the deployment workflow for logic that would be impractical in shell scripts.
 
-### check-trigger
+### Subcommands
 
-Determines whether a deployment should run and resolves deployment parameters.
+| Subcommand | Purpose |
+|---|---|
+| `select-regions` | Pick optimal primary and ML Azure regions based on geography + environment |
+| `analyze-output` | Classify orchestrator exit code/log as success, transient, or logic error |
+| `retry` | Re-run `deploy` up to N times with exponential back-off (base: 10 s) |
+| `extract-summary` | Read audit JSON files; emit `deployed_resources` and `duration` |
 
-```bash
-# Reads environment variables set by the workflow
-python3 deployment/orchestrator/cli/workflow_helper.py check-trigger
-```
-
-**Environment variables consumed**:
-
-| Variable | Source |
-|----------|--------|
-| `GITHUB_EVENT_NAME` | `github.event_name` |
-| `INPUT_ENVIRONMENT` | `inputs.environment` |
-| `INPUT_RESOURCE_GROUP` | `inputs.resource_group` |
-| `INPUT_LOCATION` | `inputs.location` |
-| `INPUT_GEOGRAPHY` | `inputs.geography` |
-| `INPUT_TEMPLATE` | `inputs.template` |
-| `INPUT_SKIP_HEALTH_CHECKS` | `inputs.skip_health_checks` |
-| `PR_LABEL_DEPLOY_DEV` | `contains(labels, 'deploy:dev')` |
-| `PR_LABEL_DEPLOY_STAGING` | `contains(labels, 'deploy:staging')` |
-| `PR_LABEL_STATUS_APPROVED` | `contains(labels, 'status:approved')` |
-| `PR_LABEL_ACTION_DEPLOY` | `contains(labels, 'action:deploy')` |
-| `COMMENT_BODY` | `github.event.comment.body` |
-
-**Outputs**: `should_deploy`, `is_dry_run`, `environment`, `resource_group`, `location`, `geography`, `template`, `parameters_file`, `skip_health_checks`
-
-### select-regions
-
-Picks the optimal primary and Azure ML regions.
-
-```bash
-python3 deployment/orchestrator/cli/workflow_helper.py select-regions \
-  --environment staging \
-  --location "" \
-  --geography americas
-```
-
-**Region selection logic**:
-
-1. If `--location` is provided, use it as the primary region.
-2. Else if `--geography` matches (`americas` → `eastus`, `europe` → `westeurope`, `asia` → `southeastasia`), use the mapped region.
-3. Otherwise default to `eastus`.
-4. For `staging` and `prod` environments whose primary region is `eastus`, the ML region is `eastus2` (to avoid capacity contention).
-
-**Outputs**: `primary_region`, `ml_region`
-
-### analyze-output
-
-Classifies the orchestrator's exit code and log text as success, transient failure, or logic error.
-
-```bash
-python3 deployment/orchestrator/cli/workflow_helper.py analyze-output \
-  --log-file orchestrator-output.log \
-  --exit-code "$EXIT_CODE"
-```
-
-**Transient patterns** (trigger `should_retry=true`): `RetryableError`, `Timeout`, `ThrottlingException`, `ServiceUnavailable`, `InternalServerError`, `ECONNRESET`, `socket hang up`, `could not resolve host`.
-
-**Outputs**: `status`, `failure_type`, `should_retry`, `is_transient`, `error_file`
-
-### retry
-
-Re-runs `deployment/deploy.py deploy` up to `--max-retries` times with **exponential back-off** (base delay: 10 s; doubles on each subsequent attempt).
-
-```bash
-python3 deployment/orchestrator/cli/workflow_helper.py retry \
-  --resource-group rg-aos-prod \
-  --location eastus \
-  --location-ml eastus2 \
-  --environment prod \
-  --template deployment/main-modular.bicep \
-  --git-sha "$GITHUB_SHA" \
-  --max-retries 3
-```
-
-**Back-off schedule** (default 3 retries):
+### Back-off schedule (default 3 retries)
 
 | Attempt | Delay before attempt |
-|---------|----------------------|
+|---|---|
 | 1 | none |
 | 2 | 10 s |
 | 3 | 20 s |
-
-**Outputs**: `retry_success`, `retry_count`
-
-### extract-summary
-
-Reads audit JSON files produced by the orchestrator and emits deployment statistics.
-
-```bash
-python3 deployment/orchestrator/cli/workflow_helper.py extract-summary \
-  --audit-dir deployment/audit
-```
-
-Reads all `*.json` files in `--audit-dir` and extracts `deployed_resources` and `duration` from the most recent successful entry.
-
-**Outputs**: `deployed_resources`, `duration`
 
 ---
 
@@ -354,14 +366,13 @@ Reads all `*.json` files in `--audit-dir` and extracts `deployed_resources` and 
 # Run workflow helper tests only
 pytest deployment/tests/test_workflow_helper.py -v
 
-# Run full test suite
+# Run full test suite (123+ tests)
 pytest deployment/tests/ -v
 ```
 
 ## References
 
 → **Repository spec**: `.github/specs/repository.md`  
-→ **Deployment guide**: `docs/deployment.md`  
 → **Architecture**: `docs/architecture.md`  
-→ **Quick start**: `deployment/QUICKSTART.md`  
+→ **Workflow templates guide**: `deployment/workflow-templates/README.md`  
 → **Error fixer skill**: `.github/skills/deployment-error-fixer/`
