@@ -72,6 +72,22 @@ def _is_rbac_authorization_warning(error_text: str) -> bool:
     return any(p.lower() in lower for p in _RBAC_AUTH_PATTERNS)
 
 
+def _contains_rbac_error(obj: Any) -> bool:
+    """Recursively check whether *obj* contains an RBAC authorization error.
+
+    Walks nested dicts / lists returned by ``az deployment operation group list``
+    and returns ``True`` if any string leaf value matches an RBAC pattern.
+    This avoids converting the object back to a JSON string purely for pattern
+    matching, keeping the data-flow in the native Python dict representation.
+    """
+    if isinstance(obj, str):
+        return _is_rbac_authorization_warning(obj)
+    if isinstance(obj, dict):
+        return any(_contains_rbac_error(v) for v in obj.values())
+    if isinstance(obj, list):
+        return any(_contains_rbac_error(item) for item in obj)
+    return False
+
 def _parse_what_if_output(output: str) -> dict[str, int]:
     """Parse ``az deployment group what-if --output json`` and count change types.
 
@@ -1321,9 +1337,22 @@ class InfrastructureManager:
             if self.config.allow_warnings:
                 error_text = (result.stderr or "") + (result.stdout or "")
                 if _is_rbac_authorization_warning(error_text):
+                    # Direct RBAC error in the outer deployment (e.g. Phase 5 policy
+                    # assignments where the error surfaces in the top-level stderr).
                     print(
                         f"  ⚠️  Phase '{phase_name}' — RBAC authorization warning detected; "
                         f"continuing (allow_warnings=True).",
+                    )
+                    succeeded = True
+                elif self._all_nested_failures_are_rbac(deployment_name):
+                    # Nested-deployment RBAC error (e.g. Phase 4 role assignments
+                    # inside functionapp.bicep modules).  The outer error is a generic
+                    # "DeploymentFailed" that does not expose the RBAC root cause; we
+                    # query each failed sub-deployment's operation statusMessage to
+                    # confirm every failure is RBAC-only before treating it as a warning.
+                    print(
+                        f"  ⚠️  Phase '{phase_name}' — all nested failures are RBAC authorization "
+                        f"warnings; continuing (allow_warnings=True).",
                     )
                     succeeded = True
         else:
@@ -1391,6 +1420,58 @@ class InfrastructureManager:
                 icon = "⏳"
             print(f"  {icon} {name:<44} {rtype:<28} {state}")
         return all_ok
+
+    def _all_nested_failures_are_rbac(self, deployment_name: str) -> bool:
+        """Return ``True`` when every failed operation in *deployment_name* is RBAC-only.
+
+        Used to extend the ``allow_warnings`` RBAC detection to phases that deploy
+        RBAC resources through **nested** module deployments (e.g. Phase 4 where
+        ``functionapp.bicep`` creates role assignments inside each module deployment).
+        In these cases the outer ``az deployment group create`` stderr only shows a
+        generic ``DeploymentFailed`` message — the actual RBAC root cause is buried in
+        each sub-deployment's ``statusMessage``.
+
+        The method queries ``az deployment operation group list`` for the phase
+        deployment and inspects the ``statusMessage`` of each failed operation.
+        Azure embeds the inner error (including ``code`` and ``message``) in the
+        top-level operation's ``statusMessage.error.details`` array when the failure
+        originated inside a nested deployment, so a single query is sufficient to
+        surface the RBAC root cause without recursing into sub-deployments.
+
+        Returns ``False`` when:
+        * the deployment does not exist (query returns nothing),
+        * there are no failed operations (caller should not have called us), or
+        * at least one failure is **not** RBAC-related (genuine template/logic error).
+        """
+        raw = self._az([
+            "deployment", "operation", "group", "list",
+            "--resource-group", self.config.resource_group,
+            "--name", deployment_name,
+            "--query", "[?properties.provisioningState == 'Failed'].properties.statusMessage",
+            "--output", "json",
+        ])
+        if not raw:
+            logger.debug(
+                "Could not retrieve deployment operations for '%s' — "
+                "cannot confirm nested RBAC-only failures.",
+                deployment_name,
+            )
+            return False
+        try:
+            failed_messages = json.loads(raw)
+        except json.JSONDecodeError:
+            return False
+        if not failed_messages:
+            return False
+        # Every failed operation must be an RBAC issue for us to treat the phase
+        # as a warning.  A mix of RBAC and non-RBAC failures is a real error.
+        # _contains_rbac_error walks the parsed dict structure directly, avoiding
+        # a json.dumps round-trip solely for pattern matching.
+        return all(
+            _contains_rbac_error(msg)
+            for msg in failed_messages
+            if msg is not None
+        )
 
     def _deployment_cmd(self, action: str, *, output_format: str = "json") -> list[str]:
         """Build the ``az deployment group <action>`` command list.

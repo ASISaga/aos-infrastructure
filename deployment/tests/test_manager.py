@@ -635,6 +635,102 @@ class TestInfrastructureManagerSteps:
         ) is False
 
     @mock.patch.object(InfrastructureManager, "_query_phase_deployment_status", return_value=True)
+    @mock.patch.object(InfrastructureManager, "_all_nested_failures_are_rbac", return_value=True)
+    @mock.patch.object(InfrastructureManager, "_run")
+    def test_deploy_phase_nested_rbac_warning_treated_as_success(
+        self,
+        mock_run: mock.Mock,
+        _mock_nested: mock.Mock,
+        _mock_status: mock.Mock,
+        manager_allow_warnings: InfrastructureManager,
+    ) -> None:
+        """Phase 4 nested RBAC errors (DeploymentFailed outer, RBAC inner) are non-fatal with allow_warnings."""
+        outer_err = (
+            'ERROR: {"status":"Failed","error":{"code":"DeploymentFailed",'
+            '"message":"At least one resource deployment operation failed."}}'
+        )
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr=outer_err,
+        )
+        result = manager_allow_warnings._deploy_phase(
+            "deployment/phases/04-function-apps.bicep", "function-apps",
+            include_location_ml=False,
+        )
+        assert result is True
+
+    @mock.patch.object(InfrastructureManager, "_query_phase_deployment_status", return_value=True)
+    @mock.patch.object(InfrastructureManager, "_all_nested_failures_are_rbac", return_value=False)
+    @mock.patch.object(InfrastructureManager, "_run")
+    def test_deploy_phase_nested_non_rbac_failure_still_fails(
+        self,
+        mock_run: mock.Mock,
+        _mock_nested: mock.Mock,
+        _mock_status: mock.Mock,
+        manager_allow_warnings: InfrastructureManager,
+    ) -> None:
+        """Non-RBAC nested failures must still be treated as real failures even with allow_warnings."""
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr='ERROR: {"code":"DeploymentFailed"}',
+        )
+        result = manager_allow_warnings._deploy_phase(
+            "deployment/phases/04-function-apps.bicep", "function-apps",
+            include_location_ml=False,
+        )
+        assert result is False
+
+    @mock.patch.object(InfrastructureManager, "_az")
+    def test_all_nested_failures_are_rbac_returns_true_when_all_rbac(
+        self, mock_az: mock.Mock, manager: InfrastructureManager
+    ) -> None:
+        """Returns True when every failed operation statusMessage is an RBAC error."""
+        rbac_msg = {
+            "status": "Failed",
+            "error": {
+                "code": "DeploymentFailed",
+                "details": [
+                    {
+                        "code": "AuthorizationFailed",
+                        "message": (
+                            "The client does not have authorization to perform action "
+                            "'Microsoft.Authorization/roleAssignments/write' over scope '/subscriptions/...'."
+                        ),
+                    }
+                ],
+            },
+        }
+        mock_az.return_value = json.dumps([rbac_msg, rbac_msg])
+        assert manager._all_nested_failures_are_rbac("phase-function-apps-dev") is True
+
+    @mock.patch.object(InfrastructureManager, "_az")
+    def test_all_nested_failures_are_rbac_returns_false_when_mixed(
+        self, mock_az: mock.Mock, manager: InfrastructureManager
+    ) -> None:
+        """Returns False when at least one failure is not RBAC-related."""
+        rbac_msg = {
+            "status": "Failed",
+            "error": {"details": [{"message": "Microsoft.Authorization/roleAssignments/write"}]},
+        }
+        non_rbac_msg = {"status": "Failed", "error": {"code": "ResourceNotFound", "message": "Not found"}}
+        mock_az.return_value = json.dumps([rbac_msg, non_rbac_msg])
+        assert manager._all_nested_failures_are_rbac("phase-function-apps-dev") is False
+
+    @mock.patch.object(InfrastructureManager, "_az")
+    def test_all_nested_failures_are_rbac_returns_false_when_no_failures(
+        self, mock_az: mock.Mock, manager: InfrastructureManager
+    ) -> None:
+        """Returns False when the query returns an empty list (no failed operations)."""
+        mock_az.return_value = json.dumps([])
+        assert manager._all_nested_failures_are_rbac("phase-function-apps-dev") is False
+
+    @mock.patch.object(InfrastructureManager, "_az")
+    def test_all_nested_failures_are_rbac_returns_false_when_query_fails(
+        self, mock_az: mock.Mock, manager: InfrastructureManager
+    ) -> None:
+        """Returns False when the az query fails (deployment not found, etc.)."""
+        mock_az.return_value = None
+        assert manager._all_nested_failures_are_rbac("phase-function-apps-dev") is False
+
+    @mock.patch.object(InfrastructureManager, "_query_phase_deployment_status", return_value=True)
     @mock.patch.object(InfrastructureManager, "_run")
     def test_deploy_phase_prints_resource_group_prominently(
         self, mock_run: mock.Mock, _mock_status: mock.Mock, manager: InfrastructureManager,
