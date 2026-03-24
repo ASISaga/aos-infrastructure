@@ -1,0 +1,213 @@
+# Reusable workflow: Deploy a Python Azure Function App via OIDC
+#
+# Usage from a calling workflow:
+#
+#   jobs:
+#     resolve-env:
+#       runs-on: ubuntu-latest
+#       outputs:
+#         environment: ${{ steps.env.outputs.environment }}
+#         key_vault_url: ${{ steps.env.outputs.key_vault_url }}
+#       steps:
+#         - id: env
+#           run: |
+#             if [[ "${{ github.event_name }}" == "repository_dispatch" ]]; then
+#               echo "environment=${{ github.event.client_payload.environment }}" >> "$GITHUB_OUTPUT"
+#               echo "key_vault_url=${{ github.event.client_payload.key_vault_url }}" >> "$GITHUB_OUTPUT"
+#             elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+#               echo "environment=${{ inputs.environment }}" >> "$GITHUB_OUTPUT"
+#               echo "key_vault_url=" >> "$GITHUB_OUTPUT"
+#             elif [[ "${{ github.event_name }}" == "release" ]]; then
+#               echo "environment=prod" >> "$GITHUB_OUTPUT"
+#               echo "key_vault_url=" >> "$GITHUB_OUTPUT"
+#             else
+#               echo "environment=dev" >> "$GITHUB_OUTPUT"
+#               echo "key_vault_url=" >> "$GITHUB_OUTPUT"
+#             fi
+#
+#     deploy:
+#       needs: resolve-env
+#       environment: ${{ needs.resolve-env.outputs.environment }}
+#       uses: ASISaga/aos-infrastructure/.github/workflows/deploy-function-app.yml@main
+#       with:
+#         app-name: 'agent-operating-system'
+#         environment: ${{ needs.resolve-env.outputs.environment }}
+#         key-vault-url: ${{ needs.resolve-env.outputs.key_vault_url }}
+#       secrets: inherit
+#
+# The calling job MUST set `environment: <env>` so that the GitHub environment
+# secrets (AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID) are
+# available to this workflow via `secrets: inherit`.
+#
+# See deployment/workflow-templates/README.md in ASISaga/aos-infrastructure for the
+# full setup guide, including how to configure GitHub Environments and retrieve
+# AZURE_CLIENT_ID from Key Vault after infrastructure provisioning.
+
+name: Deploy Function App (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      app-name:
+        description: >
+          Azure-safe application name (e.g. agent-operating-system).
+          Must match the appName used in the Bicep template
+          (deployment/phases/04-function-apps.bicep).
+        required: true
+        type: string
+      environment:
+        description: >
+          Target environment (dev | staging | prod).
+          Used for Function App prefix matching and resource group defaults.
+          This must also be set on the calling job via the `environment:` key
+          so that GitHub environment secrets are available via `secrets: inherit`.
+        required: true
+        type: string
+      key-vault-url:
+        description: >
+          Key Vault URL for auto-retrieving AZURE_CLIENT_ID on the first run
+          (infra_provisioned repository_dispatch). Leave empty on subsequent runs
+          — the workflow will use the AZURE_CLIENT_ID GitHub environment secret.
+        required: false
+        type: string
+        default: ''
+      python-version:
+        description: 'Python version to use for build and deployment.'
+        required: false
+        type: string
+        default: '3.11'
+      azure-resource-group:
+        description: >
+          Azure resource group name override. Defaults to rg-aos-<environment>
+          when not provided.
+        required: false
+        type: string
+        default: ''
+    secrets:
+      AZURE_CLIENT_ID:
+        description: 'Managed identity client ID for OIDC authentication.'
+        required: true
+      AZURE_TENANT_ID:
+        description: 'Azure AD tenant ID.'
+        required: true
+      AZURE_SUBSCRIPTION_ID:
+        description: 'Azure subscription ID.'
+        required: true
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy ${{ inputs.app-name }} (${{ inputs.environment }})
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ inputs.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install --quiet azure-identity azure-keyvault-secrets azure-mgmt-web
+          if [[ -f requirements.txt ]]; then
+            pip install --target=".python_packages/lib/site-packages" -r requirements.txt
+          fi
+
+      - name: Azure Login (OIDC) — bootstrap for Key Vault access
+        if: inputs.key-vault-url != ''
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Retrieve AZURE_CLIENT_ID from Key Vault
+        id: kv_client_id
+        if: inputs.key-vault-url != ''
+        env:
+          KV_URL: ${{ inputs.key-vault-url }}
+          DEPLOY_ENV: ${{ inputs.environment }}
+          APP_NAME: ${{ inputs.app-name }}
+          FALLBACK_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+        run: |
+          export SECRET_NAME="clientid-${APP_NAME}-${DEPLOY_ENV}"
+          CLIENT_ID=$(python3 <<'PYEOF'
+import os
+from azure.identity import DefaultAzureCredential
+from azure.keyvault.secrets import SecretClient
+
+try:
+    cred = DefaultAzureCredential()
+    secret = SecretClient(vault_url=os.environ["KV_URL"], credential=cred).get_secret(os.environ["SECRET_NAME"])
+    print(secret.value)
+except Exception:
+    pass
+PYEOF
+          )
+
+          if [[ -n "$CLIENT_ID" ]]; then
+            echo "client_id=${CLIENT_ID}" >> "$GITHUB_OUTPUT"
+            echo "  ✅ Retrieved AZURE_CLIENT_ID from Key Vault (secret: ${SECRET_NAME})"
+          else
+            echo "client_id=${FALLBACK_CLIENT_ID}" >> "$GITHUB_OUTPUT"
+            echo "  ⚠️  Secret not found in Key Vault; falling back to GitHub environment secret"
+          fi
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ steps.kv_client_id.outputs.client_id || secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Resolve Function App name
+        id: resolve
+        env:
+          DEPLOY_ENV: ${{ inputs.environment }}
+          APP_NAME: ${{ inputs.app-name }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          AZURE_RESOURCE_GROUP_OVERRIDE: ${{ inputs.azure-resource-group }}
+        run: |
+          RESOURCE_GROUP="${AZURE_RESOURCE_GROUP_OVERRIDE:-rg-aos-${DEPLOY_ENV}}"
+          export PREFIX="func-${APP_NAME}-${DEPLOY_ENV}-"
+          export RESOURCE_GROUP
+
+          FUNCTION_APP=$(python3 <<'PYEOF'
+import os, sys
+from azure.identity import DefaultAzureCredential
+from azure.mgmt.web import WebSiteManagementClient
+cred = DefaultAzureCredential()
+client = WebSiteManagementClient(cred, os.environ["AZURE_SUBSCRIPTION_ID"])
+for app in client.web_apps.list_by_resource_group(os.environ["RESOURCE_GROUP"]):
+    if (app.name or "").startswith(os.environ["PREFIX"]):
+        print(app.name)
+        sys.exit(0)
+sys.exit(1)
+PYEOF
+          )
+
+          if [[ -z "$FUNCTION_APP" ]]; then
+            echo "❌ No Function App found with prefix '${PREFIX}' in resource group '${RESOURCE_GROUP}'"
+            echo "   Run the infrastructure deployment from ASISaga/aos-infrastructure first."
+            exit 1
+          fi
+
+          echo "function_app=${FUNCTION_APP}" >> "$GITHUB_OUTPUT"
+          echo "resource_group=${RESOURCE_GROUP}" >> "$GITHUB_OUTPUT"
+          echo "✅ Deploying to Function App: ${FUNCTION_APP} (resource group: ${RESOURCE_GROUP})"
+
+      - name: Deploy to Azure Function App
+        uses: azure/functions-action@v1
+        with:
+          app-name: ${{ steps.resolve.outputs.function_app }}
+          package: .
+          respect-funcignore: true
+          scm-do-build-during-deployment: false

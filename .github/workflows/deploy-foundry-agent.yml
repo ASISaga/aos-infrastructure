@@ -1,0 +1,297 @@
+# Reusable workflow: Deploy an agent to Azure AI Foundry Agent Service via OIDC
+#
+# This workflow deploys an agent definition from the calling repository to the
+# Azure AI Foundry Agent Service. The agent repository must contain an agent
+# definition file (agent.yaml) at the repository root with the following format:
+#
+#   name: "CEO Agent"
+#   model: "gpt-4o"
+#   instructions: |
+#     You are the CEO agent...
+#   tools:
+#     - type: code_interpreter
+#     - type: file_search
+#   metadata:
+#     version: "1.0"
+#
+# The workflow creates or updates the named agent in the Foundry project.
+# If an agent with the same name already exists, it is updated in-place.
+#
+# Usage from a calling workflow:
+#
+#   jobs:
+#     resolve-env:
+#       runs-on: ubuntu-latest
+#       outputs:
+#         environment: ${{ steps.env.outputs.environment }}
+#       steps:
+#         - id: env
+#           run: |
+#             if [[ "${{ github.event_name }}" == "repository_dispatch" ]]; then
+#               echo "environment=${{ github.event.client_payload.environment }}" >> "$GITHUB_OUTPUT"
+#             elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+#               echo "environment=${{ inputs.environment }}" >> "$GITHUB_OUTPUT"
+#             elif [[ "${{ github.event_name }}" == "release" ]]; then
+#               echo "environment=prod" >> "$GITHUB_OUTPUT"
+#             else
+#               echo "environment=dev" >> "$GITHUB_OUTPUT"
+#             fi
+#
+#     deploy:
+#       needs: resolve-env
+#       environment: ${{ needs.resolve-env.outputs.environment }}
+#       uses: ASISaga/aos-infrastructure/.github/workflows/deploy-foundry-agent.yml@main
+#       with:
+#         agent-name: 'ceo-agent'
+#         environment: ${{ needs.resolve-env.outputs.environment }}
+#       secrets: inherit
+#
+# The calling job MUST set `environment: <env>` so that the GitHub environment
+# secrets (AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID) are
+# available to this workflow via `secrets: inherit`.
+#
+# One of the following must also be available to resolve the Foundry project endpoint:
+#   - FOUNDRY_PROJECT_ENDPOINT secret in the calling repo's GitHub Environment, OR
+#   - foundry-project-endpoint input passed from the caller
+#
+# See deployment/workflow-templates/README.md in ASISaga/aos-infrastructure for the
+# full setup guide.
+
+name: Deploy Foundry Agent (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      agent-name:
+        description: >
+          Agent identifier used for lookup and update in the Foundry project
+          (e.g. ceo-agent). Must be unique within the project.
+        required: true
+        type: string
+      environment:
+        description: >
+          Target environment (dev | staging | prod).
+          Used for resource group defaults and Foundry project lookup.
+          This must also be set on the calling job via the `environment:` key
+          so that GitHub environment secrets are available via `secrets: inherit`.
+        required: true
+        type: string
+      foundry-project-endpoint:
+        description: >
+          Azure AI Foundry project endpoint URL
+          (e.g. https://<hub>.api.azureml.ms/agents/v1.0/subscriptions/.../projects/<project>).
+          If not provided, the FOUNDRY_PROJECT_ENDPOINT secret is used.
+          Retrieve the endpoint from the Azure portal or Key Vault after
+          infrastructure provisioning.
+        required: false
+        type: string
+        default: ''
+      azure-resource-group:
+        description: >
+          Azure resource group name override. Defaults to rg-aos-<environment>
+          when not provided.
+        required: false
+        type: string
+        default: ''
+      python-version:
+        description: 'Python version to use for build and deployment.'
+        required: false
+        type: string
+        default: '3.11'
+    secrets:
+      AZURE_CLIENT_ID:
+        description: 'Managed identity client ID for OIDC authentication.'
+        required: true
+      AZURE_TENANT_ID:
+        description: 'Azure AD tenant ID.'
+        required: true
+      AZURE_SUBSCRIPTION_ID:
+        description: 'Azure subscription ID.'
+        required: true
+      FOUNDRY_PROJECT_ENDPOINT:
+        description: >
+          Azure AI Foundry project endpoint URL. Used when the
+          foundry-project-endpoint input is not provided.
+        required: false
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy ${{ inputs.agent-name }} (${{ inputs.environment }})
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ inputs.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install --quiet azure-identity azure-ai-projects>=1.0.0b4 pyyaml
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Resolve Foundry project endpoint
+        id: resolve_endpoint
+        env:
+          DEPLOY_ENV: ${{ inputs.environment }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          AZURE_RESOURCE_GROUP_OVERRIDE: ${{ inputs.azure-resource-group }}
+          FOUNDRY_PROJECT_ENDPOINT_INPUT: ${{ inputs.foundry-project-endpoint }}
+          FOUNDRY_PROJECT_ENDPOINT_SECRET: ${{ secrets.FOUNDRY_PROJECT_ENDPOINT }}
+        run: |
+          # Prefer input over secret, fall back to auto-discovery
+          ENDPOINT="${FOUNDRY_PROJECT_ENDPOINT_INPUT:-${FOUNDRY_PROJECT_ENDPOINT_SECRET}}"
+
+          if [[ -z "$ENDPOINT" ]]; then
+            RESOURCE_GROUP="${AZURE_RESOURCE_GROUP_OVERRIDE:-rg-aos-${DEPLOY_ENV}}"
+            export RESOURCE_GROUP
+            echo "  ℹ️  No endpoint provided; discovering from resource group: ${RESOURCE_GROUP}"
+
+            ENDPOINT=$(python3 <<'PYEOF'
+import os, sys
+from azure.identity import DefaultAzureCredential
+from azure.mgmt.machinelearningservices import MachineLearningServicesMgmtClient
+
+try:
+    cred = DefaultAzureCredential()
+    subscription_id = os.environ["AZURE_SUBSCRIPTION_ID"]
+    resource_group = os.environ.get("RESOURCE_GROUP", "")
+    ml_client = MachineLearningServicesMgmtClient(cred, subscription_id)
+    for ws in ml_client.workspaces.list_by_resource_group(resource_group):
+        # Find the AI Foundry project (kind == 'Project')
+        if getattr(ws, "kind", None) == "Project":
+            # Construct the Agents endpoint from the workspace URL
+            workspace_id = ws.workspace_hub_id or ""
+            discovery_url = ws.discovery_url or ""
+            if discovery_url:
+                # Convert discovery URL to agents endpoint
+                base = discovery_url.rstrip("/").replace("/discovery", "")
+                agents_endpoint = f"{base}/agents/v1.0/subscriptions/{subscription_id}/resourceGroups/{resource_group}/providers/Microsoft.MachineLearningServices/workspaces/{ws.name}"
+                print(agents_endpoint)
+                sys.exit(0)
+except Exception as exc:
+    print(f"Discovery failed: {exc}", file=sys.stderr)
+sys.exit(1)
+PYEOF
+            )
+          fi
+
+          if [[ -z "$ENDPOINT" ]]; then
+            echo "❌ Foundry project endpoint could not be resolved."
+            echo "   Set the FOUNDRY_PROJECT_ENDPOINT secret in the GitHub Environment"
+            echo "   or pass foundry-project-endpoint as a workflow input."
+            echo "   Run the infrastructure deployment from ASISaga/aos-infrastructure first."
+            exit 1
+          fi
+
+          echo "endpoint=${ENDPOINT}" >> "$GITHUB_OUTPUT"
+          echo "✅ Foundry project endpoint: ${ENDPOINT}"
+
+      - name: Deploy agent to Azure AI Foundry
+        env:
+          FOUNDRY_ENDPOINT: ${{ steps.resolve_endpoint.outputs.endpoint }}
+          AGENT_NAME: ${{ inputs.agent-name }}
+          DEPLOY_ENV: ${{ inputs.environment }}
+        run: |
+          python3 <<'PYEOF'
+import os
+import sys
+import json
+
+try:
+    import yaml
+except ImportError:
+    import subprocess
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet", "pyyaml"])
+    import yaml
+
+from azure.identity import DefaultAzureCredential
+from azure.ai.projects import AIProjectClient
+from azure.ai.projects.models import (
+    CodeInterpreterTool,
+    FileSearchTool,
+)
+
+TOOLS_MAP = {
+    "code_interpreter": CodeInterpreterTool,
+    "file_search": FileSearchTool,
+}
+
+# Load agent definition from agent.yaml (or agent.json)
+config = {}
+for config_file in ("agent.yaml", "agent.yml", "agent.json"):
+    if os.path.exists(config_file):
+        with open(config_file) as fh:
+            if config_file.endswith(".json"):
+                config = json.load(fh)
+            else:
+                config = yaml.safe_load(fh) or {}
+        print(f"  ✅ Loaded agent definition from {config_file}")
+        break
+
+if not config:
+    print("❌ No agent definition file found (agent.yaml / agent.yml / agent.json).")
+    print("   Create an agent.yaml in the repository root with the agent configuration.")
+    sys.exit(1)
+
+# Build tool list
+tools = []
+for tool_spec in config.get("tools", []):
+    tool_type = tool_spec.get("type", "")
+    tool_cls = TOOLS_MAP.get(tool_type)
+    if tool_cls:
+        tools.append(tool_cls())
+    else:
+        print(f"  ⚠️  Unknown tool type '{tool_type}'; skipping")
+
+agent_display_name = config.get("name", os.environ["AGENT_NAME"])
+agent_model = config.get("model", "gpt-4o")
+agent_instructions = config.get("instructions", "")
+agent_metadata = config.get("metadata", {})
+
+endpoint = os.environ["FOUNDRY_ENDPOINT"]
+cred = DefaultAzureCredential()
+client = AIProjectClient(endpoint=endpoint, credential=cred)
+
+# Check if agent already exists (match by name)
+existing_id = None
+for agent in client.agents.list_agents():
+    if agent.name == agent_display_name:
+        existing_id = agent.id
+        break
+
+if existing_id:
+    client.agents.update_agent(
+        existing_id,
+        model=agent_model,
+        name=agent_display_name,
+        instructions=agent_instructions,
+        tools=tools if tools else [],
+        metadata=agent_metadata or None,
+    )
+    print(f"  ✅ Updated agent '{agent_display_name}' (id: {existing_id})")
+else:
+    new_agent = client.agents.create_agent(
+        model=agent_model,
+        name=agent_display_name,
+        instructions=agent_instructions,
+        tools=tools if tools else [],
+        metadata=agent_metadata or None,
+    )
+    print(f"  ✅ Created agent '{agent_display_name}' (id: {new_agent.id})")
+PYEOF
