@@ -107,6 +107,19 @@ param mcpServerApps array = [
 @description('Base domain used to construct custom hostnames for standard AOS module apps (e.g. asisaga.com produces aos-dispatcher.asisaga.com). MCP server apps use their githubRepo value as the custom domain directly. Set to empty string to disable custom domain setup for all apps. Custom domain binding requires DNS CNAME records to exist before deployment — leave empty until DNS is configured.')
 param baseDomain string = ''
 
+@description('When true, deploys the GitOps Deployment Feedback Loop: an Event Grid System Topic + Logic App that listens for ARM deployment write events and updates GitHub Deployment statuses.')
+param enableGitOpsFeedback bool = false
+
+@description('When true, deploys the GitOps Policy Compliance Aggregator: a Logic App with System-Assigned MSI (Reader at subscription scope) that periodically queries Azure Resource Graph for ISO 27001 / MCSB v2 non-compliance and creates or updates a GitHub Issue.')
+param enableGitOpsCompliance bool = false
+
+@description('GitHub repository name used by the GitOps Logic Apps to update deployment statuses and compliance issues (e.g. aos-infrastructure). Required when enableGitOpsFeedback or enableGitOpsCompliance is true.')
+param githubInfraRepo string = 'aos-infrastructure'
+
+@description('GitHub Personal Access Token with repo scope. Required when enableGitOpsFeedback or enableGitOpsCompliance is true. Stored as Logic App securestring parameters — never written to ARM outputs.')
+@secure()
+param githubToken string = ''
+
 // ====================================================================
 // Variables
 // ====================================================================
@@ -332,6 +345,34 @@ module mcpServerFunctionApps 'modules/functionapp.bicep' = [for mcpApp in mcpSer
   }
 }]
 
+// ── GitOps: Deployment Feedback Loop ────────────────────────────────────────
+module gitopsFeedback 'modules/gitops-feedback.bicep' = if (enableGitOpsFeedback) {
+  name: 'gitops-feedback-${suffix}'
+  params: {
+    location: location
+    environment: environment
+    projectName: projectName
+    tags: tags
+    githubOrg: githubOrg
+    githubRepo: githubInfraRepo
+    githubToken: githubToken
+  }
+}
+
+// ── GitOps: Policy Compliance Aggregator ────────────────────────────────────
+module gitopsCompliance 'modules/gitops-compliance.bicep' = if (enableGitOpsCompliance) {
+  name: 'gitops-compliance-${suffix}'
+  params: {
+    location: location
+    environment: environment
+    projectName: projectName
+    tags: tags
+    githubOrg: githubOrg
+    githubRepo: githubInfraRepo
+    githubToken: githubToken
+  }
+}
+
 // ── Governance: Policy assignments ──────────────────────────────────────────
 module governancePolicy 'modules/policy.bicep' = if (enableGovernancePolicies) {
   name: 'governance-policy-${suffix}'
@@ -393,3 +434,6 @@ output budgetEnabled bool = monthlyBudgetAmount > 0
 // A2A Connection outputs
 output a2aConnectionNames array = a2aConnections.outputs.connectionNames
 output a2aConnectionCount int = a2aConnections.outputs.connectionCount
+// GitOps outputs
+output gitopsFeedbackEnabled bool = enableGitOpsFeedback
+output gitopsComplianceEnabled bool = enableGitOpsCompliance
