@@ -66,32 +66,29 @@ permissions:
   id-token: write
   contents: read
 
-env:
-  PYTHON_VERSION: '3.11'
-
 # Determine the target deployment environment once and pass it to each job via needs.
 jobs:
-  set-environment:
+  resolve-env:
     name: Resolve environment
     runs-on: ubuntu-latest
     outputs:
-      deploy_env: ${{ steps.env.outputs.deploy_env }}
+      environment: ${{ steps.env.outputs.environment }}
       key_vault_url: ${{ steps.env.outputs.key_vault_url }}
     steps:
-      - name: Resolve deploy env
+      - name: Resolve deploy environment
         id: env
         run: |
           if [[ "${{ github.event_name }}" == "repository_dispatch" ]]; then
-            echo "deploy_env=${{ github.event.client_payload.environment }}" >> "$GITHUB_OUTPUT"
+            echo "environment=${{ github.event.client_payload.environment }}" >> "$GITHUB_OUTPUT"
             echo "key_vault_url=${{ github.event.client_payload.key_vault_url }}" >> "$GITHUB_OUTPUT"
           elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "deploy_env=${{ inputs.environment }}" >> "$GITHUB_OUTPUT"
+            echo "environment=${{ inputs.environment }}" >> "$GITHUB_OUTPUT"
             echo "key_vault_url=" >> "$GITHUB_OUTPUT"
           elif [[ "${{ github.event_name }}" == "release" ]]; then
-            echo "deploy_env=prod" >> "$GITHUB_OUTPUT"
+            echo "environment=prod" >> "$GITHUB_OUTPUT"
             echo "key_vault_url=" >> "$GITHUB_OUTPUT"
           else
-            echo "deploy_env=dev" >> "$GITHUB_OUTPUT"
+            echo "environment=dev" >> "$GITHUB_OUTPUT"
             echo "key_vault_url=" >> "$GITHUB_OUTPUT"
           fi
 
@@ -99,446 +96,54 @@ jobs:
   # Deploy mcp-erpnext
   # ---------------------------------------------------------------------------
   deploy-erpnext:
-    name: mcp-erpnext (${{ needs.set-environment.outputs.deploy_env }})
-    needs: set-environment
-    runs-on: ubuntu-latest
-    environment: mcp-erpnext-${{ needs.set-environment.outputs.deploy_env }}
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
-
-      - name: Install dependencies
-        run: |
-          pip install --upgrade pip
-          pip install --quiet azure-identity azure-keyvault-secrets azure-mgmt-web
-          if [[ -f requirements.txt ]]; then
-            pip install --target=".python_packages/lib/site-packages" -r requirements.txt
-          fi
-
-      - name: Azure Login (OIDC) — bootstrap for Key Vault access
-        if: needs.set-environment.outputs.key_vault_url != ''
-        uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-      - name: Retrieve AZURE_CLIENT_ID from Key Vault
-        id: kv_client_id
-        if: needs.set-environment.outputs.key_vault_url != ''
-        env:
-          KV_URL: ${{ needs.set-environment.outputs.key_vault_url }}
-          DEPLOY_ENV: ${{ needs.set-environment.outputs.deploy_env }}
-          FALLBACK_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-        run: |
-          export SECRET_NAME="clientid-mcp-erpnext-${DEPLOY_ENV}"
-          CLIENT_ID=$(python3 <<'PYEOF'
-import os
-from azure.identity import DefaultAzureCredential
-from azure.keyvault.secrets import SecretClient
-
-try:
-    cred = DefaultAzureCredential()
-    secret = SecretClient(vault_url=os.environ["KV_URL"], credential=cred).get_secret(os.environ["SECRET_NAME"])
-    print(secret.value)
-except Exception:
-    pass
-PYEOF
-          )
-
-          if [[ -n "$CLIENT_ID" ]]; then
-            echo "client_id=${CLIENT_ID}" >> "$GITHUB_OUTPUT"
-            echo "  ✅ Retrieved AZURE_CLIENT_ID from Key Vault (secret: ${SECRET_NAME})"
-          else
-            echo "client_id=${FALLBACK_CLIENT_ID}" >> "$GITHUB_OUTPUT"
-            echo "  ⚠️  Secret not found in Key Vault; falling back to GitHub environment secret"
-          fi
-
-      - name: Azure Login (OIDC)
-        uses: azure/login@v2
-        with:
-          client-id: ${{ steps.kv_client_id.outputs.client_id || secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-      - name: Resolve Function App name
-        id: resolve
-        env:
-          DEPLOY_ENV: ${{ needs.set-environment.outputs.deploy_env }}
-          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          APP_NAME: mcp-erpnext
-        run: |
-          RESOURCE_GROUP="${{ vars.AZURE_RESOURCE_GROUP || format('rg-aos-{0}', env.DEPLOY_ENV) }}"
-          export PREFIX="func-${APP_NAME}-${DEPLOY_ENV}-"
-          export RESOURCE_GROUP
-
-          FUNCTION_APP=$(python3 <<'PYEOF'
-import os, sys
-from azure.identity import DefaultAzureCredential
-from azure.mgmt.web import WebSiteManagementClient
-cred = DefaultAzureCredential()
-client = WebSiteManagementClient(cred, os.environ["AZURE_SUBSCRIPTION_ID"])
-for app in client.web_apps.list_by_resource_group(os.environ["RESOURCE_GROUP"]):
-    if (app.name or "").startswith(os.environ["PREFIX"]):
-        print(app.name)
-        sys.exit(0)
-sys.exit(1)
-PYEOF
-          )
-          if [[ -z "$FUNCTION_APP" ]]; then
-            echo "❌ No Function App found with prefix '${PREFIX}' in resource group '${RESOURCE_GROUP}'"
-            exit 1
-          fi
-          echo "function_app=${FUNCTION_APP}" >> "$GITHUB_OUTPUT"
-          echo "✅ Deploying to Function App: ${FUNCTION_APP}"
-
-      - name: Deploy to Azure Function App
-        uses: azure/functions-action@v1
-        with:
-          app-name: ${{ steps.resolve.outputs.function_app }}
-          package: .
-          respect-funcignore: true
-          scm-do-build-during-deployment: false
+    name: mcp-erpnext
+    needs: resolve-env
+    environment: mcp-erpnext-${{ needs.resolve-env.outputs.environment }}
+    uses: ASISaga/aos-infrastructure/.github/workflows/deploy-function-app.yml@main
+    with:
+      app-name: 'mcp-erpnext'
+      environment: ${{ needs.resolve-env.outputs.environment }}
+      key-vault-url: ${{ needs.resolve-env.outputs.key_vault_url }}
+    secrets: inherit
 
   # ---------------------------------------------------------------------------
   # Deploy mcp-linkedin
   # ---------------------------------------------------------------------------
   deploy-linkedin:
-    name: mcp-linkedin (${{ needs.set-environment.outputs.deploy_env }})
-    needs: set-environment
-    runs-on: ubuntu-latest
-    environment: mcp-linkedin-${{ needs.set-environment.outputs.deploy_env }}
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
-
-      - name: Install dependencies
-        run: |
-          pip install --upgrade pip
-          pip install --quiet azure-identity azure-keyvault-secrets azure-mgmt-web
-          if [[ -f requirements.txt ]]; then
-            pip install --target=".python_packages/lib/site-packages" -r requirements.txt
-          fi
-
-      - name: Azure Login (OIDC) — bootstrap for Key Vault access
-        if: needs.set-environment.outputs.key_vault_url != ''
-        uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-      - name: Retrieve AZURE_CLIENT_ID from Key Vault
-        id: kv_client_id
-        if: needs.set-environment.outputs.key_vault_url != ''
-        env:
-          KV_URL: ${{ needs.set-environment.outputs.key_vault_url }}
-          DEPLOY_ENV: ${{ needs.set-environment.outputs.deploy_env }}
-          FALLBACK_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-        run: |
-          export SECRET_NAME="clientid-mcp-linkedin-${DEPLOY_ENV}"
-          CLIENT_ID=$(python3 <<'PYEOF'
-import os
-from azure.identity import DefaultAzureCredential
-from azure.keyvault.secrets import SecretClient
-
-try:
-    cred = DefaultAzureCredential()
-    secret = SecretClient(vault_url=os.environ["KV_URL"], credential=cred).get_secret(os.environ["SECRET_NAME"])
-    print(secret.value)
-except Exception:
-    pass
-PYEOF
-          )
-
-          if [[ -n "$CLIENT_ID" ]]; then
-            echo "client_id=${CLIENT_ID}" >> "$GITHUB_OUTPUT"
-            echo "  ✅ Retrieved AZURE_CLIENT_ID from Key Vault (secret: ${SECRET_NAME})"
-          else
-            echo "client_id=${FALLBACK_CLIENT_ID}" >> "$GITHUB_OUTPUT"
-            echo "  ⚠️  Secret not found in Key Vault; falling back to GitHub environment secret"
-          fi
-
-      - name: Azure Login (OIDC)
-        uses: azure/login@v2
-        with:
-          client-id: ${{ steps.kv_client_id.outputs.client_id || secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-      - name: Resolve Function App name
-        id: resolve
-        env:
-          DEPLOY_ENV: ${{ needs.set-environment.outputs.deploy_env }}
-          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          APP_NAME: mcp-linkedin
-        run: |
-          RESOURCE_GROUP="${{ vars.AZURE_RESOURCE_GROUP || format('rg-aos-{0}', env.DEPLOY_ENV) }}"
-          export PREFIX="func-${APP_NAME}-${DEPLOY_ENV}-"
-          export RESOURCE_GROUP
-
-          FUNCTION_APP=$(python3 <<'PYEOF'
-import os, sys
-from azure.identity import DefaultAzureCredential
-from azure.mgmt.web import WebSiteManagementClient
-cred = DefaultAzureCredential()
-client = WebSiteManagementClient(cred, os.environ["AZURE_SUBSCRIPTION_ID"])
-for app in client.web_apps.list_by_resource_group(os.environ["RESOURCE_GROUP"]):
-    if (app.name or "").startswith(os.environ["PREFIX"]):
-        print(app.name)
-        sys.exit(0)
-sys.exit(1)
-PYEOF
-          )
-          if [[ -z "$FUNCTION_APP" ]]; then
-            echo "❌ No Function App found with prefix '${PREFIX}' in resource group '${RESOURCE_GROUP}'"
-            exit 1
-          fi
-          echo "function_app=${FUNCTION_APP}" >> "$GITHUB_OUTPUT"
-          echo "✅ Deploying to Function App: ${FUNCTION_APP}"
-
-      - name: Deploy to Azure Function App
-        uses: azure/functions-action@v1
-        with:
-          app-name: ${{ steps.resolve.outputs.function_app }}
-          package: .
-          respect-funcignore: true
-          scm-do-build-during-deployment: false
+    name: mcp-linkedin
+    needs: resolve-env
+    environment: mcp-linkedin-${{ needs.resolve-env.outputs.environment }}
+    uses: ASISaga/aos-infrastructure/.github/workflows/deploy-function-app.yml@main
+    with:
+      app-name: 'mcp-linkedin'
+      environment: ${{ needs.resolve-env.outputs.environment }}
+      key-vault-url: ${{ needs.resolve-env.outputs.key_vault_url }}
+    secrets: inherit
 
   # ---------------------------------------------------------------------------
   # Deploy mcp-reddit
   # ---------------------------------------------------------------------------
   deploy-reddit:
-    name: mcp-reddit (${{ needs.set-environment.outputs.deploy_env }})
-    needs: set-environment
-    runs-on: ubuntu-latest
-    environment: mcp-reddit-${{ needs.set-environment.outputs.deploy_env }}
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
-
-      - name: Install dependencies
-        run: |
-          pip install --upgrade pip
-          pip install --quiet azure-identity azure-keyvault-secrets azure-mgmt-web
-          if [[ -f requirements.txt ]]; then
-            pip install --target=".python_packages/lib/site-packages" -r requirements.txt
-          fi
-
-      - name: Azure Login (OIDC) — bootstrap for Key Vault access
-        if: needs.set-environment.outputs.key_vault_url != ''
-        uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-      - name: Retrieve AZURE_CLIENT_ID from Key Vault
-        id: kv_client_id
-        if: needs.set-environment.outputs.key_vault_url != ''
-        env:
-          KV_URL: ${{ needs.set-environment.outputs.key_vault_url }}
-          DEPLOY_ENV: ${{ needs.set-environment.outputs.deploy_env }}
-          FALLBACK_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-        run: |
-          export SECRET_NAME="clientid-mcp-reddit-${DEPLOY_ENV}"
-          CLIENT_ID=$(python3 <<'PYEOF'
-import os
-from azure.identity import DefaultAzureCredential
-from azure.keyvault.secrets import SecretClient
-
-try:
-    cred = DefaultAzureCredential()
-    secret = SecretClient(vault_url=os.environ["KV_URL"], credential=cred).get_secret(os.environ["SECRET_NAME"])
-    print(secret.value)
-except Exception:
-    pass
-PYEOF
-          )
-
-          if [[ -n "$CLIENT_ID" ]]; then
-            echo "client_id=${CLIENT_ID}" >> "$GITHUB_OUTPUT"
-            echo "  ✅ Retrieved AZURE_CLIENT_ID from Key Vault (secret: ${SECRET_NAME})"
-          else
-            echo "client_id=${FALLBACK_CLIENT_ID}" >> "$GITHUB_OUTPUT"
-            echo "  ⚠️  Secret not found in Key Vault; falling back to GitHub environment secret"
-          fi
-
-      - name: Azure Login (OIDC)
-        uses: azure/login@v2
-        with:
-          client-id: ${{ steps.kv_client_id.outputs.client_id || secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-      - name: Resolve Function App name
-        id: resolve
-        env:
-          DEPLOY_ENV: ${{ needs.set-environment.outputs.deploy_env }}
-          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          APP_NAME: mcp-reddit
-        run: |
-          RESOURCE_GROUP="${{ vars.AZURE_RESOURCE_GROUP || format('rg-aos-{0}', env.DEPLOY_ENV) }}"
-          export PREFIX="func-${APP_NAME}-${DEPLOY_ENV}-"
-          export RESOURCE_GROUP
-
-          FUNCTION_APP=$(python3 <<'PYEOF'
-import os, sys
-from azure.identity import DefaultAzureCredential
-from azure.mgmt.web import WebSiteManagementClient
-cred = DefaultAzureCredential()
-client = WebSiteManagementClient(cred, os.environ["AZURE_SUBSCRIPTION_ID"])
-for app in client.web_apps.list_by_resource_group(os.environ["RESOURCE_GROUP"]):
-    if (app.name or "").startswith(os.environ["PREFIX"]):
-        print(app.name)
-        sys.exit(0)
-sys.exit(1)
-PYEOF
-          )
-          if [[ -z "$FUNCTION_APP" ]]; then
-            echo "❌ No Function App found with prefix '${PREFIX}' in resource group '${RESOURCE_GROUP}'"
-            exit 1
-          fi
-          echo "function_app=${FUNCTION_APP}" >> "$GITHUB_OUTPUT"
-          echo "✅ Deploying to Function App: ${FUNCTION_APP}"
-
-      - name: Deploy to Azure Function App
-        uses: azure/functions-action@v1
-        with:
-          app-name: ${{ steps.resolve.outputs.function_app }}
-          package: .
-          respect-funcignore: true
-          scm-do-build-during-deployment: false
+    name: mcp-reddit
+    needs: resolve-env
+    environment: mcp-reddit-${{ needs.resolve-env.outputs.environment }}
+    uses: ASISaga/aos-infrastructure/.github/workflows/deploy-function-app.yml@main
+    with:
+      app-name: 'mcp-reddit'
+      environment: ${{ needs.resolve-env.outputs.environment }}
+      key-vault-url: ${{ needs.resolve-env.outputs.key_vault_url }}
+    secrets: inherit
 
   # ---------------------------------------------------------------------------
   # Deploy mcp-subconscious
   # ---------------------------------------------------------------------------
   deploy-subconscious:
-    name: mcp-subconscious (${{ needs.set-environment.outputs.deploy_env }})
-    needs: set-environment
-    runs-on: ubuntu-latest
-    environment: mcp-subconscious-${{ needs.set-environment.outputs.deploy_env }}
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
-
-      - name: Install dependencies
-        run: |
-          pip install --upgrade pip
-          pip install --quiet azure-identity azure-keyvault-secrets azure-mgmt-web
-          if [[ -f requirements.txt ]]; then
-            pip install --target=".python_packages/lib/site-packages" -r requirements.txt
-          fi
-
-      - name: Azure Login (OIDC) — bootstrap for Key Vault access
-        if: needs.set-environment.outputs.key_vault_url != ''
-        uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-      - name: Retrieve AZURE_CLIENT_ID from Key Vault
-        id: kv_client_id
-        if: needs.set-environment.outputs.key_vault_url != ''
-        env:
-          KV_URL: ${{ needs.set-environment.outputs.key_vault_url }}
-          DEPLOY_ENV: ${{ needs.set-environment.outputs.deploy_env }}
-          FALLBACK_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-        run: |
-          export SECRET_NAME="clientid-mcp-subconscious-${DEPLOY_ENV}"
-          CLIENT_ID=$(python3 <<'PYEOF'
-import os
-from azure.identity import DefaultAzureCredential
-from azure.keyvault.secrets import SecretClient
-
-try:
-    cred = DefaultAzureCredential()
-    secret = SecretClient(vault_url=os.environ["KV_URL"], credential=cred).get_secret(os.environ["SECRET_NAME"])
-    print(secret.value)
-except Exception:
-    pass
-PYEOF
-          )
-
-          if [[ -n "$CLIENT_ID" ]]; then
-            echo "client_id=${CLIENT_ID}" >> "$GITHUB_OUTPUT"
-            echo "  ✅ Retrieved AZURE_CLIENT_ID from Key Vault (secret: ${SECRET_NAME})"
-          else
-            echo "client_id=${FALLBACK_CLIENT_ID}" >> "$GITHUB_OUTPUT"
-            echo "  ⚠️  Secret not found in Key Vault; falling back to GitHub environment secret"
-          fi
-
-      - name: Azure Login (OIDC)
-        uses: azure/login@v2
-        with:
-          client-id: ${{ steps.kv_client_id.outputs.client_id || secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-      - name: Resolve Function App name
-        id: resolve
-        env:
-          DEPLOY_ENV: ${{ needs.set-environment.outputs.deploy_env }}
-          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          APP_NAME: mcp-subconscious
-        run: |
-          RESOURCE_GROUP="${{ vars.AZURE_RESOURCE_GROUP || format('rg-aos-{0}', env.DEPLOY_ENV) }}"
-          export PREFIX="func-${APP_NAME}-${DEPLOY_ENV}-"
-          export RESOURCE_GROUP
-
-          FUNCTION_APP=$(python3 <<'PYEOF'
-import os, sys
-from azure.identity import DefaultAzureCredential
-from azure.mgmt.web import WebSiteManagementClient
-cred = DefaultAzureCredential()
-client = WebSiteManagementClient(cred, os.environ["AZURE_SUBSCRIPTION_ID"])
-for app in client.web_apps.list_by_resource_group(os.environ["RESOURCE_GROUP"]):
-    if (app.name or "").startswith(os.environ["PREFIX"]):
-        print(app.name)
-        sys.exit(0)
-sys.exit(1)
-PYEOF
-          )
-          if [[ -z "$FUNCTION_APP" ]]; then
-            echo "❌ No Function App found with prefix '${PREFIX}' in resource group '${RESOURCE_GROUP}'"
-            exit 1
-          fi
-          echo "function_app=${FUNCTION_APP}" >> "$GITHUB_OUTPUT"
-          echo "✅ Deploying to Function App: ${FUNCTION_APP}"
-
-      - name: Deploy to Azure Function App
-        uses: azure/functions-action@v1
-        with:
-          app-name: ${{ steps.resolve.outputs.function_app }}
-          package: .
-          respect-funcignore: true
-          scm-do-build-during-deployment: false
+    name: mcp-subconscious
+    needs: resolve-env
+    environment: mcp-subconscious-${{ needs.resolve-env.outputs.environment }}
+    uses: ASISaga/aos-infrastructure/.github/workflows/deploy-function-app.yml@main
+    with:
+      app-name: 'mcp-subconscious'
+      environment: ${{ needs.resolve-env.outputs.environment }}
+      key-vault-url: ${{ needs.resolve-env.outputs.key_vault_url }}
+    secrets: inherit

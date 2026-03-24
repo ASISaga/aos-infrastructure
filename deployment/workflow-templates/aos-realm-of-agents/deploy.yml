@@ -1,6 +1,6 @@
-# Deploy workflow for ASISaga/linkedin.asisaga.com
+# Deploy workflow for ASISaga/aos-realm-of-agents
 #
-# Copy this file to .github/workflows/deploy.yml in the linkedin.asisaga.com repository.
+# Copy this file to .github/workflows/deploy.yml in the aos-realm-of-agents repository.
 #
 # Prerequisites — run once from ASISaga/aos-infrastructure:
 #   1. Deploy infrastructure:  workflow_dispatch on infrastructure-deploy.yml
@@ -16,7 +16,7 @@
 #                                from azure.keyvault.secrets import SecretClient
 #                                cred = DefaultAzureCredential()
 #                                secret = SecretClient(vault_url="https://<kv-name>.vault.azure.net", credential=cred)
-#                                print(secret.get_secret("clientid-mcp-linkedin-<env>").value)
+#                                print(secret.get_secret("clientid-aos-realm-of-agents-<env>").value)
 #                                PYEOF
 #                              The Key Vault name is shown in the infrastructure deploy run summary.
 #                              On the first run, the infra_provisioned repository_dispatch event
@@ -90,7 +90,7 @@ jobs:
     environment: ${{ needs.resolve-env.outputs.environment }}
     uses: ASISaga/aos-infrastructure/.github/workflows/deploy-function-app.yml@main
     with:
-      app-name: 'mcp-linkedin'
+      app-name: 'aos-realm-of-agents'
       environment: ${{ needs.resolve-env.outputs.environment }}
       key-vault-url: ${{ needs.resolve-env.outputs.key_vault_url }}
     secrets: inherit

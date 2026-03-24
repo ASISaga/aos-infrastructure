@@ -4,6 +4,8 @@
 #
 # Prerequisites — run once from ASISaga/aos-infrastructure:
 #   1. Deploy infrastructure:  workflow_dispatch on infrastructure-deploy.yml
+#      The Bicep templates create the Function App and its User-Assigned Managed
+#      Identity, then store the identity clientId in Key Vault automatically.
 #   2. Create GitHub Environments in THIS repo: dev, staging, prod
 #   3. Add the following secrets to each environment:
 #        AZURE_CLIENT_ID     — Managed identity client ID.
@@ -57,138 +59,38 @@ permissions:
   id-token: write
   contents: read
 
-env:
-  PYTHON_VERSION: '3.11'
-  # Azure-safe application name — must match the appName in the mcpServerApps array in deployment/phases/04-function-apps.bicep
-  APP_NAME: 'mcp-reddit'
-
 jobs:
-  deploy:
-    name: Deploy (${{ github.event_name == 'repository_dispatch' && github.event.client_payload.environment || github.event_name == 'workflow_dispatch' && inputs.environment || (github.event_name == 'release' && 'prod' || 'dev') }})
+  resolve-env:
+    name: Resolve environment
     runs-on: ubuntu-latest
-    environment: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.environment || github.event_name == 'workflow_dispatch' && inputs.environment || (github.event_name == 'release' && 'prod' || 'dev') }}
-
+    outputs:
+      environment: ${{ steps.env.outputs.environment }}
+      key_vault_url: ${{ steps.env.outputs.key_vault_url }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
-
-      - name: Install dependencies
+      - name: Resolve deploy environment
+        id: env
         run: |
-          pip install --upgrade pip
-          pip install --quiet azure-identity azure-keyvault-secrets azure-mgmt-web
-          if [[ -f requirements.txt ]]; then
-            pip install --target=".python_packages/lib/site-packages" -r requirements.txt
-          fi
-
-      - name: Resolve Azure credentials
-        id: azure_creds
-        run: |
-          # When triggered by repository_dispatch (infra_provisioned), the infra
-          # pipeline stores the client ID in Key Vault and includes it in the event
-          # payload.  For all other triggers, fall back to the GitHub environment secret.
           if [[ "${{ github.event_name }}" == "repository_dispatch" ]]; then
-            KV_URL="${{ github.event.client_payload.key_vault_url }}"
-            if [[ -n "$KV_URL" ]]; then
-              echo "  ℹ️  Retrieving AZURE_CLIENT_ID from Key Vault: ${KV_URL}"
-              echo "key_vault_url=${KV_URL}" >> "$GITHUB_OUTPUT"
-              echo "use_keyvault=true" >> "$GITHUB_OUTPUT"
-            else
-              echo "use_keyvault=false" >> "$GITHUB_OUTPUT"
-            fi
+            echo "environment=${{ github.event.client_payload.environment }}" >> "$GITHUB_OUTPUT"
+            echo "key_vault_url=${{ github.event.client_payload.key_vault_url }}" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "environment=${{ inputs.environment }}" >> "$GITHUB_OUTPUT"
+            echo "key_vault_url=" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ github.event_name }}" == "release" ]]; then
+            echo "environment=prod" >> "$GITHUB_OUTPUT"
+            echo "key_vault_url=" >> "$GITHUB_OUTPUT"
           else
-            echo "use_keyvault=false" >> "$GITHUB_OUTPUT"
+            echo "environment=dev" >> "$GITHUB_OUTPUT"
+            echo "key_vault_url=" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Azure Login (OIDC) — bootstrap for Key Vault access
-        if: steps.azure_creds.outputs.use_keyvault == 'true'
-        uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-      - name: Retrieve AZURE_CLIENT_ID from Key Vault
-        id: kv_client_id
-        if: steps.azure_creds.outputs.use_keyvault == 'true'
-        env:
-          KV_URL: ${{ steps.azure_creds.outputs.key_vault_url }}
-          DEPLOY_ENV: ${{ github.event.client_payload.environment }}
-          FALLBACK_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-        run: |
-          export SECRET_NAME="clientid-${{ env.APP_NAME }}-${DEPLOY_ENV}"
-          CLIENT_ID=$(python3 <<'PYEOF'
-import os
-from azure.identity import DefaultAzureCredential
-from azure.keyvault.secrets import SecretClient
-
-try:
-    cred = DefaultAzureCredential()
-    secret = SecretClient(vault_url=os.environ["KV_URL"], credential=cred).get_secret(os.environ["SECRET_NAME"])
-    print(secret.value)
-except Exception:
-    pass
-PYEOF
-          )
-
-          if [[ -n "$CLIENT_ID" ]]; then
-            echo "client_id=${CLIENT_ID}" >> "$GITHUB_OUTPUT"
-            echo "  ✅ Retrieved AZURE_CLIENT_ID from Key Vault (secret: ${SECRET_NAME})"
-          else
-            echo "client_id=${FALLBACK_CLIENT_ID}" >> "$GITHUB_OUTPUT"
-            echo "  ⚠️  Secret not found in Key Vault; falling back to GitHub environment secret"
-          fi
-
-      - name: Azure Login (OIDC)
-        uses: azure/login@v2
-        with:
-          client-id: ${{ steps.kv_client_id.outputs.client_id || secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-      - name: Resolve Function App name
-        id: resolve
-        env:
-          DEPLOY_ENV: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.environment || github.event_name == 'workflow_dispatch' && inputs.environment || (github.event_name == 'release' && 'prod' || 'dev') }}
-          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-        run: |
-          RESOURCE_GROUP="${{ vars.AZURE_RESOURCE_GROUP || format('rg-aos-{0}', env.DEPLOY_ENV) }}"
-          export PREFIX="func-${{ env.APP_NAME }}-${DEPLOY_ENV}-"
-          export RESOURCE_GROUP
-
-          FUNCTION_APP=$(python3 <<'PYEOF'
-import os, sys
-from azure.identity import DefaultAzureCredential
-from azure.mgmt.web import WebSiteManagementClient
-cred = DefaultAzureCredential()
-client = WebSiteManagementClient(cred, os.environ["AZURE_SUBSCRIPTION_ID"])
-for app in client.web_apps.list_by_resource_group(os.environ["RESOURCE_GROUP"]):
-    if (app.name or "").startswith(os.environ["PREFIX"]):
-        print(app.name)
-        sys.exit(0)
-sys.exit(1)
-PYEOF
-          )
-
-          if [[ -z "$FUNCTION_APP" ]]; then
-            echo "❌ No Function App found with prefix '${PREFIX}' in resource group '${RESOURCE_GROUP}'"
-            echo "   Run the infrastructure deployment from ASISaga/aos-infrastructure first."
-            exit 1
-          fi
-
-          echo "function_app=${FUNCTION_APP}" >> "$GITHUB_OUTPUT"
-          echo "resource_group=${RESOURCE_GROUP}" >> "$GITHUB_OUTPUT"
-          echo "✅ Deploying to Function App: ${FUNCTION_APP} (resource group: ${RESOURCE_GROUP})"
-
-      - name: Deploy to Azure Function App
-        uses: azure/functions-action@v1
-        with:
-          app-name: ${{ steps.resolve.outputs.function_app }}
-          package: .
-          respect-funcignore: true
-          scm-do-build-during-deployment: false
+  deploy:
+    name: Deploy
+    needs: resolve-env
+    environment: ${{ needs.resolve-env.outputs.environment }}
+    uses: ASISaga/aos-infrastructure/.github/workflows/deploy-function-app.yml@main
+    with:
+      app-name: 'mcp-reddit'
+      environment: ${{ needs.resolve-env.outputs.environment }}
+      key-vault-url: ${{ needs.resolve-env.outputs.key_vault_url }}
+    secrets: inherit
