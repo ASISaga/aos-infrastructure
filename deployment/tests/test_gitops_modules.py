@@ -121,7 +121,7 @@ class TestGitopsFeedback:
         assert "listCallbackUrl(" in self.text
 
     def test_github_deployment_status_api_endpoint(self) -> None:
-        assert "api.github.com" in self.text
+        assert "https://api.github.com/repos/" in self.text
         assert "/deployments/" in self.text
         assert "/statuses" in self.text
 
@@ -221,8 +221,7 @@ class TestGitopsCompliance:
         assert "Join" in self.text
 
     def test_github_issue_search(self) -> None:
-        assert "api.github.com" in self.text
-        assert "search/issues" in self.text
+        assert "https://api.github.com/search/issues" in self.text
         assert "[Compliance]" in self.text or "%5BCompliance%5D" in self.text
 
     def test_compliance_issue_title(self) -> None:
