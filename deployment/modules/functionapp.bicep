@@ -126,9 +126,14 @@ resource federatedCredential 'Microsoft.ManagedIdentity/userAssignedIdentities/f
 // Optional additional Workload Identity Federation — allows a second GitHub repository (e.g. a monorepo)
 // to also exchange OIDC tokens for Azure credentials for this app's managed identity.
 // The identity and RBAC scope remain the same; only the allowed OIDC issuer subject is broadened.
+// NOTE: dependsOn federatedCredential is required to serialise writes to the same managed identity.
+//   Azure does not support concurrent FederatedIdentityCredentials writes for a single identity
+//   (error: ConcurrentFederatedIdentityCredentialsWritesForSingleManagedIdentity), so the
+//   additional credential must wait for the primary one to complete before being created.
 resource additionalFederatedCredential 'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials@2023-01-31' = if (!empty(additionalGithubRepo)) {
   parent: userAssignedIdentity
   name: 'github-${appName}-${environment}-${additionalGithubRepo}'
+  dependsOn: [federatedCredential]
   properties: {
     issuer: 'https://token.actions.githubusercontent.com'
     subject: 'repo:${githubOrg}/${additionalGithubRepo}:environment:${githubEnvironment}'
