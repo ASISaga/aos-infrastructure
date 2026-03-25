@@ -413,6 +413,7 @@ jobs:
             --location "${{ steps.region_select.outputs.primary_region }}" \
             --environment "${{ needs.validate.outputs.environment }}" \
             --template "${{ inputs.template || 'deployment/main-modular.bicep' }}" \
+            --subscription-id "${{ secrets.AZURE_SUBSCRIPTION_ID }}" \
             2>&1 | tee -a orchestrator-output.log
           EXIT_CODE=${PIPESTATUS[0]}
           set -e

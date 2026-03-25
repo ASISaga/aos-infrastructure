@@ -831,6 +831,96 @@ class TestInfrastructureManagerSteps:
         # When the deployment doesn't exist yet (e.g. dry-run), return True (non-fatal).
         assert manager._query_phase_deployment_status("phase-foundation-dev") is True
 
+    # ── fetch_identity_client_ids ──────────────────────────────────────
+
+    @mock.patch("orchestrator.core.manager.ManagedIdentityClient")
+    @mock.patch("orchestrator.core.manager.KeyVaultIdentityStore")
+    @mock.patch("subprocess.run")
+    def test_fetch_identity_client_ids_uses_config_subscription_id(
+        self,
+        mock_run: mock.Mock,
+        mock_kv_store_cls: mock.Mock,
+        mock_msi_cls: mock.Mock,
+        manager: InfrastructureManager,
+    ) -> None:
+        """subscription_id from config is forwarded to ManagedIdentityClient."""
+        manager.config.subscription_id = "sub-from-config"
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="https://kv-test.vault.azure.net\n", stderr=""
+        )
+        from orchestrator.integration.identity_client import IdentityInfo
+        mock_identity = IdentityInfo(
+            name="id-my-app-dev",
+            client_id="client-uuid",
+            principal_id="principal-uuid",
+            resource_id="/sub/rg/id",
+            location="eastus",
+            resource_group="rg-test",
+        )
+        mock_msi_cls.return_value.list_function_app_identities.return_value = [mock_identity]
+
+        result = manager.fetch_identity_client_ids()
+
+        assert result is True
+        mock_msi_cls.assert_called_once_with(
+            subscription_id="sub-from-config",
+            resource_group="rg-test",
+        )
+
+    @mock.patch("orchestrator.core.manager.ManagedIdentityClient")
+    @mock.patch("orchestrator.core.manager.KeyVaultIdentityStore")
+    @mock.patch("subprocess.run")
+    def test_fetch_identity_client_ids_falls_back_to_env_var(
+        self,
+        mock_run: mock.Mock,
+        mock_kv_store_cls: mock.Mock,
+        mock_msi_cls: mock.Mock,
+        manager: InfrastructureManager,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """When subscription_id is empty in config, AZURE_SUBSCRIPTION_ID env var is used."""
+        manager.config.subscription_id = ""
+        monkeypatch.setenv("AZURE_SUBSCRIPTION_ID", "sub-from-env")
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="https://kv-test.vault.azure.net\n", stderr=""
+        )
+        from orchestrator.integration.identity_client import IdentityInfo
+        mock_identity = IdentityInfo(
+            name="id-my-app-dev",
+            client_id="client-uuid",
+            principal_id="principal-uuid",
+            resource_id="/sub/rg/id",
+            location="eastus",
+            resource_group="rg-test",
+        )
+        mock_msi_cls.return_value.list_function_app_identities.return_value = [mock_identity]
+
+        result = manager.fetch_identity_client_ids()
+
+        assert result is True
+        mock_msi_cls.assert_called_once_with(
+            subscription_id="sub-from-env",
+            resource_group="rg-test",
+        )
+
+    @mock.patch("subprocess.run")
+    def test_fetch_identity_client_ids_returns_false_when_subscription_id_missing(
+        self,
+        mock_run: mock.Mock,
+        manager: InfrastructureManager,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Returns False (and prints a clear error) when subscription_id is absent."""
+        manager.config.subscription_id = ""
+        monkeypatch.delenv("AZURE_SUBSCRIPTION_ID", raising=False)
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="https://kv-test.vault.azure.net\n", stderr=""
+        )
+
+        result = manager.fetch_identity_client_ids()
+
+        assert result is False
+
 
 # ====================================================================
 # deploy.py CLI — step subcommand tests
@@ -960,3 +1050,28 @@ class TestDeployPyStepCommands:
     @mock.patch("orchestrator.core.manager.InfrastructureManager.deploy_bicep_governance", return_value=False)
     def test_deploy_bicep_governance_exits_one_on_failure(self, mock_fn: mock.Mock) -> None:
         assert self._run(["deploy-bicep-governance"] + self.BASE_ARGS) == 1
+
+    @mock.patch("orchestrator.core.manager.InfrastructureManager.fetch_identity_client_ids", return_value=True)
+    def test_fetch_identity_client_ids_subcommand_exits_zero(self, mock_fn: mock.Mock) -> None:
+        assert self._run(
+            ["fetch-identity-client-ids"] + self.BASE_ARGS
+            + ["--subscription-id", "sub-123"]
+        ) == 0
+        mock_fn.assert_called_once()
+
+    @mock.patch("orchestrator.core.manager.InfrastructureManager.fetch_identity_client_ids", return_value=False)
+    def test_fetch_identity_client_ids_subcommand_exits_one_on_failure(self, mock_fn: mock.Mock) -> None:
+        assert self._run(
+            ["fetch-identity-client-ids"] + self.BASE_ARGS
+            + ["--subscription-id", "sub-123"]
+        ) == 1
+
+    @mock.patch("orchestrator.core.manager.InfrastructureManager.fetch_identity_client_ids", return_value=True)
+    def test_fetch_identity_client_ids_subscription_id_forwarded_to_config(
+        self, mock_fn: mock.Mock
+    ) -> None:
+        """--subscription-id CLI argument is forwarded to DeploymentConfig.subscription_id."""
+        assert self._run(
+            ["fetch-identity-client-ids"] + self.BASE_ARGS + ["--subscription-id", "sub-xyz"]
+        ) == 0
+        mock_fn.assert_called_once()
