@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import subprocess
 import sys
@@ -157,6 +158,17 @@ class InfrastructureManager:
             self.config.subscription_id, self.config.resource_group
         )
         return self._sdk_client
+
+    def _resolve_subscription_id(self) -> str:
+        """Return the Azure subscription ID from config or environment.
+
+        Checks ``config.subscription_id`` first; falls back to the
+        ``AZURE_SUBSCRIPTION_ID`` environment variable.  Returns an empty
+        string when neither source provides a value.
+        """
+        return self.config.subscription_id or os.environ.get(
+            "AZURE_SUBSCRIPTION_ID", ""
+        )
 
     # ------------------------------------------------------------------
     # Public API
@@ -800,8 +812,20 @@ class InfrastructureManager:
             print("  ⚠️  No Key Vault found in resource group — is Phase 1 deployed?")
             return False
 
+        subscription_id = self._resolve_subscription_id()
+        if not subscription_id:
+            print(
+                "  ❌ subscription_id is required — pass --subscription-id "
+                "or set the AZURE_SUBSCRIPTION_ID environment variable"
+            )
+            logger.error(
+                "fetch_identity_client_ids: subscription_id is empty; "
+                "pass --subscription-id or set AZURE_SUBSCRIPTION_ID"
+            )
+            return False
+
         msi_client = ManagedIdentityClient(
-            subscription_id=self.config.subscription_id,
+            subscription_id=subscription_id,
             resource_group=self.config.resource_group,
         )
         kv_store = KeyVaultIdentityStore(vault_url=vault_url)
