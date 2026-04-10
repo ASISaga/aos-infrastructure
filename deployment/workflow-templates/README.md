@@ -1,7 +1,7 @@
 # Azure Function App & Foundry Agent Deployment Workflow Templates
 
-This directory contains GitHub Actions workflow files for deploying each AOS platform
-service, MCP server, and C-Suite agent. Copy the appropriate subdirectory's `deploy.yml`
+This directory contained GitHub Actions workflow files for deploying each AOS platform
+service, MCP server, and C-Suite agent. Moved the appropriate subdirectory's `deploy.yml`
 to `.github/workflows/deploy.yml` in the corresponding repository.
 
 Each template is a **thin caller** that delegates all deployment logic to reusable
