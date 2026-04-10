@@ -21,26 +21,26 @@ pick up fixes and improvements when they reference `@main`.
 
 ### Azure Function Apps
 
-| Repository | Template | Azure Function App (pattern) | Custom Domain |
-|---|---|---|---|
-| [agent-operating-system](https://github.com/ASISaga/agent-operating-system) | `agent-operating-system/deploy.yml` | `func-agent-operating-system-{env}-*` | `agent-operating-system.asisaga.com` |
-| [aos-realm-of-agents](https://github.com/ASISaga/aos-realm-of-agents) | `aos-realm-of-agents/deploy.yml` | `func-aos-realm-of-agents-{env}-*` | `aos-realm-of-agents.asisaga.com` |
-| [business-infinity](https://github.com/ASISaga/business-infinity) | `business-infinity/deploy.yml` | `func-business-infinity-{env}-*` | `business-infinity.asisaga.com` |
-| [mcp](https://github.com/ASISaga/mcp) _(monorepo)_ | `mcp/deploy.yml` | all 4 MCP Function Apps in parallel | — |
-| [erpnext.asisaga.com](https://github.com/ASISaga/erpnext.asisaga.com) | `erpnext.asisaga.com/deploy.yml` | `func-mcp-erpnext-{env}-*` | `erpnext.asisaga.com` |
-| [linkedin.asisaga.com](https://github.com/ASISaga/linkedin.asisaga.com) | `linkedin.asisaga.com/deploy.yml` | `func-mcp-linkedin-{env}-*` | `linkedin.asisaga.com` |
-| [reddit.asisaga.com](https://github.com/ASISaga/reddit.asisaga.com) | `reddit.asisaga.com/deploy.yml` | `func-mcp-reddit-{env}-*` | `reddit.asisaga.com` |
-| [subconscious.asisaga.com](https://github.com/ASISaga/subconscious.asisaga.com) | `subconscious.asisaga.com/deploy.yml` | `func-mcp-subconscious-{env}-*` | `subconscious.asisaga.com` |
+| Repository | Template | Per-Workflow README | Azure Function App (pattern) | Custom Domain |
+|---|---|---|---|---|
+| [agent-operating-system](https://github.com/ASISaga/agent-operating-system) | `agent-operating-system/deploy.yml` | [README](agent-operating-system/README.md) | `func-agent-operating-system-{env}-*` | `agent-operating-system.asisaga.com` |
+| [aos-realm-of-agents](https://github.com/ASISaga/aos-realm-of-agents) | `aos-realm-of-agents/deploy.yml` | [README](aos-realm-of-agents/README.md) | `func-aos-realm-of-agents-{env}-*` | `aos-realm-of-agents.asisaga.com` |
+| [business-infinity](https://github.com/ASISaga/business-infinity) | `business-infinity/deploy.yml` | [README](business-infinity/README.md) | `func-business-infinity-{env}-*` | `business-infinity.asisaga.com` |
+| [mcp](https://github.com/ASISaga/mcp) _(monorepo)_ | `mcp/deploy.yml` | [README](mcp/README.md) | all 4 MCP Function Apps in parallel | — |
+| [erpnext.asisaga.com](https://github.com/ASISaga/erpnext.asisaga.com) | `erpnext.asisaga.com/deploy.yml` | [README](erpnext.asisaga.com/README.md) | `func-mcp-erpnext-{env}-*` | `erpnext.asisaga.com` |
+| [linkedin.asisaga.com](https://github.com/ASISaga/linkedin.asisaga.com) | `linkedin.asisaga.com/deploy.yml` | [README](linkedin.asisaga.com/README.md) | `func-mcp-linkedin-{env}-*` | `linkedin.asisaga.com` |
+| [reddit.asisaga.com](https://github.com/ASISaga/reddit.asisaga.com) | `reddit.asisaga.com/deploy.yml` | [README](reddit.asisaga.com/README.md) | `func-mcp-reddit-{env}-*` | `reddit.asisaga.com` |
+| [subconscious.asisaga.com](https://github.com/ASISaga/subconscious.asisaga.com) | `subconscious.asisaga.com/deploy.yml` | [README](subconscious.asisaga.com/README.md) | `func-mcp-subconscious-{env}-*` | `subconscious.asisaga.com` |
 
 ### Azure AI Foundry Agents
 
-| Repository | Template | Deployed To |
-|---|---|---|
-| [ceo-agent](https://github.com/ASISaga/ceo-agent) | `ceo-agent/deploy.yml` | Azure AI Foundry Agent Service |
-| [cfo-agent](https://github.com/ASISaga/cfo-agent) | `cfo-agent/deploy.yml` | Azure AI Foundry Agent Service |
-| [cto-agent](https://github.com/ASISaga/cto-agent) | `cto-agent/deploy.yml` | Azure AI Foundry Agent Service |
-| [cso-agent](https://github.com/ASISaga/cso-agent) | `cso-agent/deploy.yml` | Azure AI Foundry Agent Service |
-| [cmo-agent](https://github.com/ASISaga/cmo-agent) | `cmo-agent/deploy.yml` | Azure AI Foundry Agent Service |
+| Repository | Template | Per-Workflow README | Deployed To |
+|---|---|---|---|
+| [ceo-agent](https://github.com/ASISaga/ceo-agent) | `ceo-agent/deploy.yml` | [README](ceo-agent/README.md) | Azure AI Foundry Agent Service |
+| [cfo-agent](https://github.com/ASISaga/cfo-agent) | `cfo-agent/deploy.yml` | [README](cfo-agent/README.md) | Azure AI Foundry Agent Service |
+| [cto-agent](https://github.com/ASISaga/cto-agent) | `cto-agent/deploy.yml` | [README](cto-agent/README.md) | Azure AI Foundry Agent Service |
+| [cso-agent](https://github.com/ASISaga/cso-agent) | `cso-agent/deploy.yml` | [README](cso-agent/README.md) | Azure AI Foundry Agent Service |
+| [cmo-agent](https://github.com/ASISaga/cmo-agent) | `cmo-agent/deploy.yml` | [README](cmo-agent/README.md) | Azure AI Foundry Agent Service |
 
 ---
 
