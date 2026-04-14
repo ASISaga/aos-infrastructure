@@ -3,7 +3,7 @@ name: "Orchestrator — Full Stack Deploy"
 # correct dependency order and handles all post-deployment tasks.
 #
 # Dependency graph:
-#   validate → foundation → ai-services  (parallel)
+#   validate → foundation → ai_services  (parallel)
 #                         → compute      (parallel)
 #             governance                 (independent of foundation)
 #   finalize (waits for all phases)
@@ -327,7 +327,7 @@ jobs:
   # ============================================================================
   # PHASE 2 & 3 — AI Services (requires foundation)
   # ============================================================================
-  ai-services:
+  ai_services:
     name: "Phases 2 & 3 — AI Services"
     needs: [validate, foundation]
     if: >-
@@ -345,7 +345,7 @@ jobs:
     secrets: inherit
 
   # ============================================================================
-  # PHASE 4 — Compute / Function Apps (requires foundation, parallel to ai-services)
+  # PHASE 4 — Compute / Function Apps (requires foundation, parallel to ai_services)
   # ============================================================================
   compute:
     name: "Phase 4 — Compute"
@@ -386,9 +386,9 @@ jobs:
   # ============================================================================
   # RESOURCE INVENTORY — Show what was provisioned and code deployment targets
   # ============================================================================
-  resource-inventory:
+  resource_inventory:
     name: Resource Inventory
-    needs: [validate, foundation, ai-services, compute, governance]
+    needs: [validate, foundation, ai_services, compute, governance]
     if: always()
     runs-on: ubuntu-latest
     environment: ${{ needs.validate.outputs.environment }}
@@ -477,7 +477,7 @@ jobs:
   # ============================================================================
   finalize:
     name: Finalize
-    needs: [validate, foundation, ai-services, compute, governance]
+    needs: [validate, foundation, ai_services, compute, governance]
     if: always() && needs.validate.outputs.is_dry_run != 'true'
     runs-on: ubuntu-latest
     environment: ${{ needs.validate.outputs.environment }}
@@ -593,7 +593,7 @@ jobs:
         if: always()
         run: |
           F1="${{ needs.foundation.result }}"
-          F2="${{ needs.ai-services.result }}"
+          F2="${{ needs.ai_services.result }}"
           F4="${{ needs.compute.result }}"
           F5="${{ needs.governance.result }}"
 
@@ -642,8 +642,8 @@ jobs:
           echo "| Phase | Status |"                       >> "$GITHUB_STEP_SUMMARY"
           echo "|-------|--------|"                       >> "$GITHUB_STEP_SUMMARY"
           echo "| **Phase 1** — Foundation       | $(step_icon "$F1") |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| **Phase 2** — AI Services      | $(step_icon "${{ needs.ai-services.outputs.ai_services_outcome }}") |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| **Phase 3** — AI Applications  | $(step_icon "${{ needs.ai-services.outputs.ai_apps_outcome }}") |"    >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Phase 2** — AI Services      | $(step_icon "${{ needs.ai_services.outputs.ai_services_outcome }}") |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Phase 3** — AI Applications  | $(step_icon "${{ needs.ai_services.outputs.ai_apps_outcome }}") |"    >> "$GITHUB_STEP_SUMMARY"
           echo "| **Phase 4** — Function Apps    | $(step_icon "$F4") |" >> "$GITHUB_STEP_SUMMARY"
           echo "| **Phase 5** — Governance       | $(step_icon "$F5") |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Health Check    | $(step_icon "${{ steps.health_check.outcome }}") |"        >> "$GITHUB_STEP_SUMMARY"
