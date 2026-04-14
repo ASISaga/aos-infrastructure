@@ -1,0 +1,662 @@
+name: "Orchestrator — Full Stack Deploy"
+# Full-stack infrastructure orchestrator. Chains all five Bicep phases in the
+# correct dependency order and handles all post-deployment tasks.
+#
+# Dependency graph:
+#   validate → foundation → ai_services  (parallel)
+#                         → compute      (parallel)
+#             governance                 (independent of foundation)
+#   finalize (waits for all phases)
+#
+# Standalone usage (workflow_dispatch):
+#   The primary entry-point for full-stack infrastructure deployments.
+#
+# Chained usage (workflow_call):
+#   Can be triggered from other automation workflows.
+#   All inputs and secrets are forwarded to phase workflows.
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+      resource_group:
+        description: 'Azure resource group name (leave blank for default rg-aos-<env>)'
+        required: false
+        type: string
+      location:
+        description: 'Primary Azure region (auto-selected if empty)'
+        required: false
+        type: string
+        default: ''
+      geography:
+        description: 'Geographic preference for auto-region selection (used when location is empty)'
+        required: false
+        type: choice
+        options:
+          - ''
+          - americas
+          - europe
+          - asia
+        default: ''
+      template:
+        description: 'Bicep template file path'
+        required: false
+        type: string
+        default: 'deployment/main-modular.bicep'
+      dry_run:
+        description: 'Plan only — no actual changes (lint → validate → what-if)'
+        required: false
+        type: boolean
+        default: false
+      skip_health_checks:
+        description: 'Skip post-deployment health checks'
+        required: false
+        type: boolean
+        default: false
+      deploy_function_apps:
+        description: 'Deploy Python Function Apps via SDK bridge after Bicep (requires aos-client-sdk)'
+        required: false
+        type: boolean
+        default: false
+      sync_kernel_config:
+        description: 'Sync AOS kernel env vars to all Function Apps after deployment'
+        required: false
+        type: boolean
+        default: false
+
+  workflow_call:
+    inputs:
+      environment:
+        description: 'Target environment (dev | staging | prod)'
+        required: true
+        type: string
+      resource_group:
+        description: 'Azure resource group name (leave blank for default rg-aos-<env>)'
+        required: false
+        type: string
+        default: ''
+      location:
+        description: 'Primary Azure region (auto-selected if empty)'
+        required: false
+        type: string
+        default: ''
+      geography:
+        description: 'Geographic preference for auto-region selection'
+        required: false
+        type: string
+        default: ''
+      template:
+        description: 'Bicep template file path'
+        required: false
+        type: string
+        default: 'deployment/main-modular.bicep'
+      dry_run:
+        description: 'Plan only — no actual changes'
+        required: false
+        type: boolean
+        default: false
+      skip_health_checks:
+        description: 'Skip post-deployment health checks'
+        required: false
+        type: boolean
+        default: false
+      deploy_function_apps:
+        description: 'Deploy Python Function Apps via SDK bridge after Bicep'
+        required: false
+        type: boolean
+        default: false
+      sync_kernel_config:
+        description: 'Sync AOS kernel env vars to all Function Apps after deployment'
+        required: false
+        type: boolean
+        default: false
+    outputs:
+      status:
+        description: 'Overall deployment status (success | failure)'
+        value: ${{ jobs.finalize.outputs.status }}
+
+permissions:
+  id-token: write
+  contents: read
+  # Required to dispatch repository_dispatch events to code repositories
+  # (via DEPLOY_DISPATCH_TOKEN secret — a PAT with repo scope)
+  actions: write
+
+env:
+  PYTHON_VERSION: '3.12'
+
+jobs:
+  # ============================================================================
+  # VALIDATE — Resolve inputs, select regions, lint, ARM validate, what-if
+  # ============================================================================
+  validate:
+    name: Validate & Prepare
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    outputs:
+      environment:          ${{ steps.resolve.outputs.environment }}
+      resource_group:       ${{ steps.resolve.outputs.resource_group }}
+      parameters_file:      ${{ steps.resolve.outputs.parameters_file }}
+      is_dry_run:           ${{ steps.resolve.outputs.is_dry_run }}
+      primary_region:       ${{ steps.region_select.outputs.primary_region }}
+      ml_region:            ${{ steps.region_select.outputs.ml_region }}
+      arm_validate_outcome: ${{ steps.arm_validate.outcome }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: pip install -e .
+
+      - name: Azure Login (OIDC)
+        id: login
+        uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Resolve inputs
+        id: resolve
+        run: |
+          ENV="${{ inputs.environment }}"
+          RG="${{ inputs.resource_group }}"
+          [ -z "$RG" ] && RG="rg-aos-${ENV}"
+          TEMPLATE="${{ inputs.template || 'deployment/main-modular.bicep' }}"
+          IS_DRY_RUN="${{ inputs.dry_run }}"
+          PARAMS="deployment/parameters/${ENV}.bicepparam"
+          [ ! -f "$PARAMS" ] && PARAMS=""
+
+          echo "environment=$ENV"         >> "$GITHUB_OUTPUT"
+          echo "resource_group=$RG"       >> "$GITHUB_OUTPUT"
+          echo "template=$TEMPLATE"       >> "$GITHUB_OUTPUT"
+          echo "parameters_file=$PARAMS"  >> "$GITHUB_OUTPUT"
+          echo "is_dry_run=$IS_DRY_RUN"   >> "$GITHUB_OUTPUT"
+
+      - name: Auto-select deployment regions
+        id: region_select
+        run: |
+          python3 deployment/orchestrator/cli/workflow_helper.py select-regions \
+            --environment "${{ steps.resolve.outputs.environment }}" \
+            --location    "${{ inputs.location }}" \
+            --geography   "${{ inputs.geography }}"
+
+      - name: Install Azure Bicep
+        run: az bicep install
+
+      - name: Lint Bicep template
+        id: lint
+        continue-on-error: true
+        run: |
+          echo "🔍 Linting ${{ inputs.template || 'deployment/main-modular.bicep' }}..."
+          az bicep lint --file "${{ inputs.template || 'deployment/main-modular.bicep' }}" 2>&1 | tee lint-output.txt
+
+      - name: Validation summary
+        if: always()
+        run: |
+          echo "## 🔍 Template Validation" >> "$GITHUB_STEP_SUMMARY"
+          echo ""                           >> "$GITHUB_STEP_SUMMARY"
+          echo "| Check | Status |"        >> "$GITHUB_STEP_SUMMARY"
+          echo "|-------|--------|"        >> "$GITHUB_STEP_SUMMARY"
+          echo "| Bicep lint | ${{ steps.lint.outcome == 'success' && '✅ passed' || '⚠️ warnings (non-blocking)' }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Environment | \`${{ steps.resolve.outputs.environment }}\` |"    >> "$GITHUB_STEP_SUMMARY"
+          echo "| Resource Group | \`${{ steps.resolve.outputs.resource_group }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Mode | ${{ inputs.dry_run == true && '📋 Plan (dry-run)' || '🚀 Deploy' }} |" >> "$GITHUB_STEP_SUMMARY"
+
+      # ── Azure-side pre-flight ────────────────────────────────────────────
+
+      - name: Ensure Resource Group
+        id: ensure_rg
+        continue-on-error: true
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          set +e
+          python3 deployment/deploy.py ensure-rg \
+            --resource-group "${{ steps.resolve.outputs.resource_group }}" \
+            --location       "${{ steps.region_select.outputs.primary_region }}" \
+            --environment    "${{ steps.resolve.outputs.environment }}" \
+            --template       "${{ inputs.template || 'deployment/main-modular.bicep' }}" \
+            --allow-warnings \
+            --git-sha        "${{ github.sha }}" \
+            2>&1 | tee -a orchestrator-output.log
+          EXIT_CODE=${PIPESTATUS[0]}
+          set -e
+          exit $EXIT_CODE
+
+      - name: Validate ARM Template
+        id: arm_validate
+        if: steps.ensure_rg.outcome == 'success'
+        continue-on-error: true
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          ARGS=(
+            validate
+            --resource-group "${{ steps.resolve.outputs.resource_group }}"
+            --location       "${{ steps.region_select.outputs.primary_region }}"
+            --location-ml    "${{ steps.region_select.outputs.ml_region }}"
+            --environment    "${{ steps.resolve.outputs.environment }}"
+            --template       "${{ inputs.template || 'deployment/main-modular.bicep' }}"
+            --allow-warnings
+            --git-sha        "${{ github.sha }}"
+          )
+          PARAMS="${{ steps.resolve.outputs.parameters_file }}"
+          [[ -n "$PARAMS" && -f "$PARAMS" ]] && ARGS+=(--parameters "$PARAMS")
+          set +e
+          python3 deployment/deploy.py "${ARGS[@]}" 2>&1 | tee -a orchestrator-output.log
+          EXIT_CODE=${PIPESTATUS[0]}
+          set -e
+          exit $EXIT_CODE
+
+      - name: What-If Analysis
+        id: what_if
+        if: steps.ensure_rg.outcome == 'success'
+        continue-on-error: true
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          ARGS=(
+            what-if
+            --resource-group "${{ steps.resolve.outputs.resource_group }}"
+            --location       "${{ steps.region_select.outputs.primary_region }}"
+            --location-ml    "${{ steps.region_select.outputs.ml_region }}"
+            --environment    "${{ steps.resolve.outputs.environment }}"
+            --template       "${{ inputs.template || 'deployment/main-modular.bicep' }}"
+            --allow-warnings
+            --git-sha        "${{ github.sha }}"
+          )
+          PARAMS="${{ steps.resolve.outputs.parameters_file }}"
+          [[ -n "$PARAMS" && -f "$PARAMS" ]] && ARGS+=(--parameters "$PARAMS")
+          set +e
+          python3 deployment/deploy.py "${ARGS[@]}" 2>&1 | tee -a orchestrator-output.log
+          EXIT_CODE=${PIPESTATUS[0]}
+          set -e
+          exit $EXIT_CODE
+
+      - name: Upload validate logs
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: validate-logs-${{ github.run_id }}
+          path: |
+            deployment/audit/*.json
+            orchestrator-*.log
+            lint-output.txt
+          retention-days: 90
+          if-no-files-found: ignore
+
+  # ============================================================================
+  # PHASE 1 — Foundation
+  # ============================================================================
+  foundation:
+    name: "Phase 1 — Foundation"
+    needs: validate
+    if: >-
+      !cancelled() &&
+      needs.validate.outputs.is_dry_run != 'true' &&
+      needs.validate.outputs.arm_validate_outcome == 'success'
+    uses: ./.github/workflows/infra-foundation.yml
+    with:
+      environment:    ${{ needs.validate.outputs.environment }}
+      resource_group: ${{ needs.validate.outputs.resource_group }}
+      primary_region: ${{ needs.validate.outputs.primary_region }}
+      ml_region:      ${{ needs.validate.outputs.ml_region }}
+      template:       ${{ inputs.template || 'deployment/main-modular.bicep' }}
+      parameters_file: ${{ needs.validate.outputs.parameters_file }}
+    secrets: inherit
+
+  # ============================================================================
+  # PHASE 2 & 3 — AI Services (requires foundation)
+  # ============================================================================
+  ai_services:
+    name: "Phases 2 & 3 — AI Services"
+    needs: [validate, foundation]
+    if: >-
+      !cancelled() &&
+      needs.validate.outputs.is_dry_run != 'true' &&
+      needs.foundation.result == 'success'
+    uses: ./.github/workflows/infra-ai-services.yml
+    with:
+      environment:    ${{ needs.validate.outputs.environment }}
+      resource_group: ${{ needs.validate.outputs.resource_group }}
+      primary_region: ${{ needs.validate.outputs.primary_region }}
+      ml_region:      ${{ needs.validate.outputs.ml_region }}
+      template:       ${{ inputs.template || 'deployment/main-modular.bicep' }}
+      parameters_file: ${{ needs.validate.outputs.parameters_file }}
+    secrets: inherit
+
+  # ============================================================================
+  # PHASE 4 — Compute / Function Apps (requires foundation, parallel to ai_services)
+  # ============================================================================
+  compute:
+    name: "Phase 4 — Compute"
+    needs: [validate, foundation]
+    if: >-
+      !cancelled() &&
+      needs.validate.outputs.is_dry_run != 'true' &&
+      needs.foundation.result == 'success'
+    uses: ./.github/workflows/infra-compute.yml
+    with:
+      environment:    ${{ needs.validate.outputs.environment }}
+      resource_group: ${{ needs.validate.outputs.resource_group }}
+      primary_region: ${{ needs.validate.outputs.primary_region }}
+      ml_region:      ${{ needs.validate.outputs.ml_region }}
+      template:       ${{ inputs.template || 'deployment/main-modular.bicep' }}
+      parameters_file: ${{ needs.validate.outputs.parameters_file }}
+    secrets: inherit
+
+  # ============================================================================
+  # PHASE 5 — Governance (independent — runs after validate)
+  # ============================================================================
+  governance:
+    name: "Phase 5 — Governance"
+    needs: validate
+    if: >-
+      !cancelled() &&
+      needs.validate.outputs.is_dry_run != 'true' &&
+      needs.validate.outputs.arm_validate_outcome == 'success'
+    uses: ./.github/workflows/infra-governance.yml
+    with:
+      environment:    ${{ needs.validate.outputs.environment }}
+      resource_group: ${{ needs.validate.outputs.resource_group }}
+      primary_region: ${{ needs.validate.outputs.primary_region }}
+      template:       ${{ inputs.template || 'deployment/main-modular.bicep' }}
+      parameters_file: ${{ needs.validate.outputs.parameters_file }}
+    secrets: inherit
+
+  # ============================================================================
+  # RESOURCE INVENTORY — Show what was provisioned and code deployment targets
+  # ============================================================================
+  resource_inventory:
+    name: Resource Inventory
+    needs: [validate, foundation, ai_services, compute, governance]
+    if: always()
+    runs-on: ubuntu-latest
+    environment: ${{ needs.validate.outputs.environment }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: pip install -e .
+
+      - name: Azure Login (OIDC)
+        id: login
+        continue-on-error: true
+        uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: List provisioned resources
+        id: inventory
+        continue-on-error: true
+        run: |
+          RG="${{ needs.validate.outputs.resource_group }}"
+          AZURE_OPS="python3 deployment/orchestrator/cli/azure_ops.py --subscription-id ${{ secrets.AZURE_SUBSCRIPTION_ID }}"
+
+          echo "## 📦 Provisioned Resource Inventory" >> "$GITHUB_STEP_SUMMARY"
+          echo ""                                       >> "$GITHUB_STEP_SUMMARY"
+
+          RG_EXISTS=$($AZURE_OPS resource-group-exists --resource-group "$RG" 2>/dev/null || echo "false")
+          if [[ "$RG_EXISTS" != "true" ]]; then
+            echo "Resource group \`$RG\` does not exist yet. Run the deployment first." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          RESOURCES=$($AZURE_OPS list-resources --resource-group "$RG" --output markdown 2>/dev/null || echo "[]")
+
+          if [[ "$RESOURCES" == "[]" ]]; then
+            echo "No resources found in \`$RG\`." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          echo "### Resources in \`$RG\`"                                                   >> "$GITHUB_STEP_SUMMARY"
+          echo ""                                                                             >> "$GITHUB_STEP_SUMMARY"
+          echo "| Resource | Type | Location | Bicep Module |"                               >> "$GITHUB_STEP_SUMMARY"
+          echo "|----------|------|----------|-------------|"                                >> "$GITHUB_STEP_SUMMARY"
+          echo "$RESOURCES" | python3 deployment/orchestrator/cli/resource_mapper.py        >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Code repository deployment guide
+        if: always()
+        run: |
+          ENV="${{ needs.validate.outputs.environment }}"
+
+          echo ""                                                                                        >> "$GITHUB_STEP_SUMMARY"
+          echo "### 🗺️ Code Repository → Azure Deployment Target"                                       >> "$GITHUB_STEP_SUMMARY"
+          echo ""                                                                                        >> "$GITHUB_STEP_SUMMARY"
+          echo "Each deployable repository gets a dedicated Azure Function App created by \`modules/functionapp.bicep\`." >> "$GITHUB_STEP_SUMMARY"
+          echo "Function Apps follow the naming pattern: \`func-{appName}-${ENV}-{uniqueSuffix}\`"      >> "$GITHUB_STEP_SUMMARY"
+          echo ""                                                                                        >> "$GITHUB_STEP_SUMMARY"
+          echo "#### Platform Services (Function Apps)"                                                  >> "$GITHUB_STEP_SUMMARY"
+          echo ""                                                                                        >> "$GITHUB_STEP_SUMMARY"
+          echo "| Repository | Azure Function App | Custom Domain |"                                    >> "$GITHUB_STEP_SUMMARY"
+          echo "|------------|-------------------|---------------|"                                     >> "$GITHUB_STEP_SUMMARY"
+          echo "| [agent-operating-system](https://github.com/ASISaga/agent-operating-system) | \`func-agent-operating-system-${ENV}-*\` | \`agent-operating-system.asisaga.com\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| [aos-realm-of-agents](https://github.com/ASISaga/aos-realm-of-agents) | \`func-aos-realm-of-agents-${ENV}-*\` | \`aos-realm-of-agents.asisaga.com\` |"         >> "$GITHUB_STEP_SUMMARY"
+          echo "| [business-infinity](https://github.com/ASISaga/business-infinity) | \`func-business-infinity-${ENV}-*\` | \`business-infinity.asisaga.com\` |"               >> "$GITHUB_STEP_SUMMARY"
+          echo ""                                                                                        >> "$GITHUB_STEP_SUMMARY"
+          echo "> **Note**: \`aos-kernel\`, \`aos-intelligence\`, \`aos-client-sdk\`, and \`aos-dispatcher\` are code-only Python library repositories — they have no dedicated Function Apps." >> "$GITHUB_STEP_SUMMARY"
+          echo ""                                                                                        >> "$GITHUB_STEP_SUMMARY"
+          echo "#### MCP Server Modules (Function Apps)"                                                 >> "$GITHUB_STEP_SUMMARY"
+          echo ""                                                                                        >> "$GITHUB_STEP_SUMMARY"
+          echo "| Repository | Azure Function App | Custom Domain |"                                    >> "$GITHUB_STEP_SUMMARY"
+          echo "|------------|-------------------|---------------|"                                     >> "$GITHUB_STEP_SUMMARY"
+          echo "| [erpnext.asisaga.com](https://github.com/ASISaga/erpnext.asisaga.com) | \`func-mcp-erpnext-${ENV}-*\` | \`erpnext.asisaga.com\` |"         >> "$GITHUB_STEP_SUMMARY"
+          echo "| [linkedin.asisaga.com](https://github.com/ASISaga/linkedin.asisaga.com) | \`func-mcp-linkedin-${ENV}-*\` | \`linkedin.asisaga.com\` |"     >> "$GITHUB_STEP_SUMMARY"
+          echo "| [reddit.asisaga.com](https://github.com/ASISaga/reddit.asisaga.com) | \`func-mcp-reddit-${ENV}-*\` | \`reddit.asisaga.com\` |"             >> "$GITHUB_STEP_SUMMARY"
+          echo "| [subconscious.asisaga.com](https://github.com/ASISaga/subconscious.asisaga.com) | \`func-mcp-subconscious-${ENV}-*\` | \`subconscious.asisaga.com\` |" >> "$GITHUB_STEP_SUMMARY"
+
+  # ============================================================================
+  # FINALIZE — Post-deploy health check, optional code deploy, summary
+  # ============================================================================
+  finalize:
+    name: Finalize
+    needs: [validate, foundation, ai_services, compute, governance]
+    if: always() && needs.validate.outputs.is_dry_run != 'true'
+    runs-on: ubuntu-latest
+    environment: ${{ needs.validate.outputs.environment }}
+    outputs:
+      status: ${{ steps.result.outputs.status }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: pip install -e .
+
+      - name: Azure Login (OIDC)
+        id: login
+        uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # ── Post-Deploy Health Check ──────────────────────────────────────────
+      - name: Post-Deploy Health Check
+        id: health_check
+        if: >-
+          needs.foundation.result == 'success' &&
+          needs.compute.result == 'success' &&
+          inputs.skip_health_checks != true
+        continue-on-error: true
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          set +e
+          python3 deployment/deploy.py health-check \
+            --resource-group "${{ needs.validate.outputs.resource_group }}" \
+            --location       "${{ needs.validate.outputs.primary_region }}" \
+            --environment    "${{ needs.validate.outputs.environment }}" \
+            --template       "${{ inputs.template || 'deployment/main-modular.bicep' }}" \
+            --allow-warnings \
+            --git-sha        "${{ github.sha }}" \
+            2>&1 | tee -a orchestrator-output.log
+          EXIT_CODE=${PIPESTATUS[0]}
+          set -e
+          exit $EXIT_CODE
+
+      # ── Deploy Python Function Apps (optional) ────────────────────────────
+      - name: Deploy Python Function Apps
+        id: deploy_function_apps
+        if: >-
+          needs.compute.result == 'success' &&
+          inputs.deploy_function_apps == true
+        continue-on-error: true
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          set +e
+          python3 deployment/deploy.py deploy-function-apps \
+            --resource-group "${{ needs.validate.outputs.resource_group }}" \
+            --location       "${{ needs.validate.outputs.primary_region }}" \
+            --environment    "${{ needs.validate.outputs.environment }}" \
+            --template       "${{ inputs.template || 'deployment/main-modular.bicep' }}" \
+            --allow-warnings \
+            --git-sha        "${{ github.sha }}" \
+            2>&1 | tee -a orchestrator-output.log
+          EXIT_CODE=${PIPESTATUS[0]}
+          set -e
+          exit $EXIT_CODE
+
+      # ── Sync Kernel Configuration (optional) ─────────────────────────────
+      - name: Sync Kernel Configuration
+        id: sync_kernel_config
+        if: >-
+          needs.compute.result == 'success' &&
+          inputs.sync_kernel_config == true
+        continue-on-error: true
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          set +e
+          python3 deployment/deploy.py sync-kernel-config \
+            --resource-group "${{ needs.validate.outputs.resource_group }}" \
+            --location       "${{ needs.validate.outputs.primary_region }}" \
+            --environment    "${{ needs.validate.outputs.environment }}" \
+            --template       "${{ inputs.template || 'deployment/main-modular.bicep' }}" \
+            --allow-warnings \
+            --git-sha        "${{ github.sha }}" \
+            2>&1 | tee -a orchestrator-output.log
+          EXIT_CODE=${PIPESTATUS[0]}
+          set -e
+          exit $EXIT_CODE
+
+      # ── Extract deployment summary ────────────────────────────────────────
+      - name: Extract deployment summary
+        id: summary
+        if: always()
+        run: |
+          python3 deployment/orchestrator/cli/workflow_helper.py extract-summary \
+            --audit-dir deployment/audit
+
+      # ── Overall result ────────────────────────────────────────────────────
+      - name: Deployment result
+        id: result
+        if: always()
+        run: |
+          F1="${{ needs.foundation.result }}"
+          F2="${{ needs.ai_services.result }}"
+          F4="${{ needs.compute.result }}"
+          F5="${{ needs.governance.result }}"
+
+          FAILED=0
+          for R in "$F1" "$F2" "$F4" "$F5"; do
+            [[ "$R" == "failure" ]] && ((FAILED++)) || true
+          done
+
+          if [[ "${{ inputs.deploy_function_apps }}" == "true" && "${{ steps.deploy_function_apps.outcome }}" == "failure" ]]; then
+            ((FAILED++)) || true
+          fi
+          if [[ "${{ inputs.sync_kernel_config }}" == "true" && "${{ steps.sync_kernel_config.outcome }}" == "failure" ]]; then
+            ((FAILED++)) || true
+          fi
+
+          STATUS=$([[ $FAILED -eq 0 ]] && echo "success" || echo "failure")
+          echo "status=$STATUS" >> "$GITHUB_OUTPUT"
+
+          step_icon() {
+            case "$1" in
+              success)  echo "✅ success" ;;
+              failure)  echo "❌ failed"  ;;
+              skipped)  echo "⏭️ skipped" ;;
+              *)        echo "⬜ not run" ;;
+            esac
+          }
+
+          echo "## 🚀 Deployment Result"                 >> "$GITHUB_STEP_SUMMARY"
+          echo ""                                          >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$STATUS" == "success" ]]; then
+            echo "### ✅ Deployment Succeeded"            >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### ❌ Deployment Failed"               >> "$GITHUB_STEP_SUMMARY"
+            echo ""                                        >> "$GITHUB_STEP_SUMMARY"
+            echo "Review the phase logs above for details." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo ""                                          >> "$GITHUB_STEP_SUMMARY"
+          echo "| Detail | Value |"                       >> "$GITHUB_STEP_SUMMARY"
+          echo "|--------|-------|"                       >> "$GITHUB_STEP_SUMMARY"
+          echo "| Environment    | \`${{ needs.validate.outputs.environment }}\`    |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Resource Group | \`${{ needs.validate.outputs.resource_group }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Primary Region | \`${{ needs.validate.outputs.primary_region }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| ML Region      | \`${{ needs.validate.outputs.ml_region }}\`      |" >> "$GITHUB_STEP_SUMMARY"
+          echo ""                                          >> "$GITHUB_STEP_SUMMARY"
+          echo "### 🔢 Phase Status"                      >> "$GITHUB_STEP_SUMMARY"
+          echo "| Phase | Status |"                       >> "$GITHUB_STEP_SUMMARY"
+          echo "|-------|--------|"                       >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Phase 1** — Foundation       | $(step_icon "$F1") |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Phase 2** — AI Services      | $(step_icon "${{ needs.ai_services.outputs.ai_services_outcome }}") |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Phase 3** — AI Applications  | $(step_icon "${{ needs.ai_services.outputs.ai_apps_outcome }}") |"    >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Phase 4** — Function Apps    | $(step_icon "$F4") |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Phase 5** — Governance       | $(step_icon "$F5") |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Health Check    | $(step_icon "${{ steps.health_check.outcome }}") |"        >> "$GITHUB_STEP_SUMMARY"
+          echo "| Function Apps   | $(step_icon "${{ steps.deploy_function_apps.outcome }}") |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Kernel Config   | $(step_icon "${{ steps.sync_kernel_config.outcome }}") |"  >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload audit logs
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: deployment-audit-${{ github.run_id }}
+          path: |
+            deployment/audit/*.json
+            orchestrator-*.log
+          retention-days: 90
+          if-no-files-found: ignore
