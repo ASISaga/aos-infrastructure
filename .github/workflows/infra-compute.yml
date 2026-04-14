@@ -1,0 +1,378 @@
+name: "Phase 4 — Compute (Function Apps)"
+# Deploys the AOS compute layer: functionApps, mcpServerFunctionApps.
+# Requires Phase 1 (foundation) to be deployed; runs independently of Phases 2 & 3.
+#
+# Post-deploy steps (run only when Bicep phase succeeds):
+#   - Store Function App managed-identity clientIds in Key Vault
+#   - Signal code repositories via repository_dispatch (infra_provisioned)
+#
+# Standalone usage (workflow_dispatch):
+#   Trigger manually; pre-flight steps run automatically.
+#   Ensure foundation resources are already deployed.
+#
+# Chained usage (workflow_call from orchestrator-full-stack.yml):
+#   Orchestrator guarantees foundation succeeded; caller passes pre-computed regions.
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        type: choice
+        options: [dev, staging, prod]
+      resource_group:
+        description: 'Azure resource group (blank for default rg-aos-<env>)'
+        required: false
+        type: string
+      location:
+        description: 'Primary Azure region (auto-selected if empty)'
+        required: false
+        type: string
+        default: ''
+      geography:
+        description: 'Geographic preference for auto-region selection'
+        required: false
+        type: choice
+        options: ['', americas, europe, asia]
+        default: ''
+      template:
+        description: 'Bicep template file path'
+        required: false
+        type: string
+        default: 'deployment/main-modular.bicep'
+      dry_run:
+        description: 'Plan only — lint, validate, what-if; no deploy'
+        required: false
+        type: boolean
+        default: false
+
+  workflow_call:
+    inputs:
+      environment:
+        description: 'Target environment (dev | staging | prod)'
+        required: true
+        type: string
+      resource_group:
+        description: 'Azure resource group name'
+        required: true
+        type: string
+      primary_region:
+        description: 'Primary Azure region (pre-computed by orchestrator)'
+        required: true
+        type: string
+      ml_region:
+        description: 'ML Azure region (pre-computed by orchestrator)'
+        required: false
+        type: string
+        default: ''
+      template:
+        description: 'Bicep template file path'
+        required: false
+        type: string
+        default: 'deployment/main-modular.bicep'
+      parameters_file:
+        description: 'Path to .bicepparam parameters file'
+        required: false
+        type: string
+        default: ''
+    outputs:
+      outcome:
+        description: 'Phase 4 deployment outcome (success | failure | skipped)'
+        value: ${{ jobs.deploy.outputs.outcome }}
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  PYTHON_VERSION: '3.12'
+
+jobs:
+  deploy:
+    name: "Phase 4 — Function Apps"
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    outputs:
+      outcome: ${{ steps.phase_result.outputs.outcome }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: pip install -e .
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Resolve context
+        id: ctx
+        run: |
+          ENV="${{ inputs.environment }}"
+          RG="${{ inputs.resource_group }}"
+          [ -z "$RG" ] && RG="rg-aos-${ENV}"
+          PARAMS="${{ inputs.parameters_file }}"
+          if [[ -z "$PARAMS" && "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            PARAMS="deployment/parameters/${ENV}.bicepparam"
+            [ ! -f "$PARAMS" ] && PARAMS=""
+          fi
+          echo "environment=$ENV"        >> "$GITHUB_OUTPUT"
+          echo "resource_group=$RG"      >> "$GITHUB_OUTPUT"
+          echo "parameters_file=$PARAMS" >> "$GITHUB_OUTPUT"
+
+      - name: Select regions
+        id: regions
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_call" ]]; then
+            echo "primary_region=${{ inputs.primary_region }}" >> "$GITHUB_OUTPUT"
+            echo "ml_region=${{ inputs.ml_region }}"           >> "$GITHUB_OUTPUT"
+          else
+            python3 deployment/orchestrator/cli/workflow_helper.py select-regions \
+              --environment "${{ inputs.environment }}" \
+              --location    "${{ inputs.location }}" \
+              --geography   "${{ inputs.geography }}"
+          fi
+
+      # ── Pre-flight (standalone workflow_dispatch only) ─────────────────────
+
+      - name: Install Azure Bicep
+        if: github.event_name == 'workflow_dispatch'
+        run: az bicep install
+
+      - name: Ensure Resource Group
+        id: ensure_rg
+        if: github.event_name == 'workflow_dispatch'
+        continue-on-error: true
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          set +e
+          python3 deployment/deploy.py ensure-rg \
+            --resource-group "${{ steps.ctx.outputs.resource_group }}" \
+            --location       "${{ steps.regions.outputs.primary_region }}" \
+            --environment    "${{ steps.ctx.outputs.environment }}" \
+            --template       "${{ inputs.template || 'deployment/main-modular.bicep' }}" \
+            --allow-warnings \
+            --git-sha        "${{ github.sha }}" \
+            2>&1 | tee -a orchestrator-output.log
+          EXIT_CODE=${PIPESTATUS[0]}
+          set -e
+          exit $EXIT_CODE
+
+      - name: Lint Bicep Template
+        id: lint
+        if: github.event_name == 'workflow_dispatch'
+        continue-on-error: true
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          set +e
+          python3 deployment/deploy.py lint \
+            --resource-group "${{ steps.ctx.outputs.resource_group }}" \
+            --location       "${{ steps.regions.outputs.primary_region }}" \
+            --environment    "${{ steps.ctx.outputs.environment }}" \
+            --template       "${{ inputs.template || 'deployment/main-modular.bicep' }}" \
+            --allow-warnings \
+            --git-sha        "${{ github.sha }}" \
+            2>&1 | tee -a orchestrator-output.log
+          EXIT_CODE=${PIPESTATUS[0]}
+          set -e
+          exit $EXIT_CODE
+
+      - name: Validate ARM Template
+        id: arm_validate
+        if: github.event_name == 'workflow_dispatch' && steps.ensure_rg.outcome == 'success'
+        continue-on-error: true
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          ARGS=(
+            validate
+            --resource-group "${{ steps.ctx.outputs.resource_group }}"
+            --location       "${{ steps.regions.outputs.primary_region }}"
+            --location-ml    "${{ steps.regions.outputs.ml_region }}"
+            --environment    "${{ steps.ctx.outputs.environment }}"
+            --template       "${{ inputs.template || 'deployment/main-modular.bicep' }}"
+            --allow-warnings
+            --git-sha        "${{ github.sha }}"
+          )
+          PARAMS="${{ steps.ctx.outputs.parameters_file }}"
+          [[ -n "$PARAMS" && -f "$PARAMS" ]] && ARGS+=(--parameters "$PARAMS")
+          set +e
+          python3 deployment/deploy.py "${ARGS[@]}" 2>&1 | tee -a orchestrator-output.log
+          EXIT_CODE=${PIPESTATUS[0]}
+          set -e
+          exit $EXIT_CODE
+
+      - name: What-If Analysis
+        id: what_if
+        if: github.event_name == 'workflow_dispatch' && steps.ensure_rg.outcome == 'success'
+        continue-on-error: true
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          ARGS=(
+            what-if
+            --resource-group "${{ steps.ctx.outputs.resource_group }}"
+            --location       "${{ steps.regions.outputs.primary_region }}"
+            --location-ml    "${{ steps.regions.outputs.ml_region }}"
+            --environment    "${{ steps.ctx.outputs.environment }}"
+            --template       "${{ inputs.template || 'deployment/main-modular.bicep' }}"
+            --allow-warnings
+            --git-sha        "${{ github.sha }}"
+          )
+          PARAMS="${{ steps.ctx.outputs.parameters_file }}"
+          [[ -n "$PARAMS" && -f "$PARAMS" ]] && ARGS+=(--parameters "$PARAMS")
+          set +e
+          python3 deployment/deploy.py "${ARGS[@]}" 2>&1 | tee -a orchestrator-output.log
+          EXIT_CODE=${PIPESTATUS[0]}
+          set -e
+          exit $EXIT_CODE
+
+      # ── Phase 4 Deploy ─────────────────────────────────────────────────────
+
+      - name: "Bicep Phase 4 — Function Apps"
+        id: deploy_bicep_function_apps
+        if: >-
+          inputs.dry_run != true &&
+          (github.event_name == 'workflow_call' ||
+           steps.arm_validate.outcome == 'success')
+        continue-on-error: true
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          set +e
+          python3 deployment/deploy.py deploy-bicep-function-apps \
+            --resource-group "${{ steps.ctx.outputs.resource_group }}" \
+            --location       "${{ steps.regions.outputs.primary_region }}" \
+            --location-ml    "${{ steps.regions.outputs.ml_region }}" \
+            --environment    "${{ steps.ctx.outputs.environment }}" \
+            --template       "${{ inputs.template || 'deployment/main-modular.bicep' }}" \
+            --allow-warnings \
+            --git-sha        "${{ github.sha }}" \
+            2>&1 | tee -a orchestrator-output.log
+          EXIT_CODE=${PIPESTATUS[0]}
+          set -e
+          exit $EXIT_CODE
+
+      # ── Store Function App client IDs in Key Vault ────────────────────────
+      # After Phase 4 provisions Function Apps and their User-Assigned Managed
+      # Identities, fetch each identity's clientId via ManagedServiceIdentityClient
+      # and store in Key Vault as "clientid-{app}-{env}" for code repos to consume.
+      - name: Store Function App client IDs in Key Vault
+        id: store_client_ids
+        if: steps.deploy_bicep_function_apps.outcome == 'success'
+        continue-on-error: true
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          set +e
+          python3 deployment/deploy.py fetch-identity-client-ids \
+            --resource-group   "${{ steps.ctx.outputs.resource_group }}" \
+            --location         "${{ steps.regions.outputs.primary_region }}" \
+            --environment      "${{ steps.ctx.outputs.environment }}" \
+            --template         "${{ inputs.template || 'deployment/main-modular.bicep' }}" \
+            --subscription-id  "${{ secrets.AZURE_SUBSCRIPTION_ID }}" \
+            2>&1 | tee -a orchestrator-output.log
+          EXIT_CODE=${PIPESTATUS[0]}
+          set -e
+          exit $EXIT_CODE
+
+      # ── Signal code repositories (repository_dispatch) ────────────────────
+      # Dispatch infra_provisioned to code repos so code deployments start
+      # automatically.  Requires DEPLOY_DISPATCH_TOKEN secret (PAT, repo scope).
+      - name: Signal code repositories (infra_provisioned)
+        id: dispatch_code_repos
+        if: steps.deploy_bicep_function_apps.outcome == 'success'
+        continue-on-error: true
+        env:
+          DISPATCH_TOKEN: ${{ secrets.DEPLOY_DISPATCH_TOKEN }}
+          ENVIRONMENT: ${{ steps.ctx.outputs.environment }}
+          RESOURCE_GROUP: ${{ steps.ctx.outputs.resource_group }}
+          ORG: ASISaga
+        run: |
+          if [[ -z "$DISPATCH_TOKEN" ]]; then
+            echo "⏭️  DEPLOY_DISPATCH_TOKEN not set — skipping repository_dispatch"
+            echo "   Add a GitHub PAT with repo scope as DEPLOY_DISPATCH_TOKEN to enable automatic code deployments."
+            exit 0
+          fi
+
+          KV_URL=$(python3 deployment/orchestrator/cli/azure_ops.py list-keyvaults \
+            --resource-group    "$RESOURCE_GROUP" \
+            --subscription-id   "${{ secrets.AZURE_SUBSCRIPTION_ID }}" \
+            --output uri 2>/dev/null || echo "")
+
+          PAYLOAD=$(cat <<EOF
+          {
+            "environment": "${ENVIRONMENT}",
+            "resource_group": "${RESOURCE_GROUP}",
+            "key_vault_url": "${KV_URL}",
+            "infra_sha": "${{ github.sha }}",
+            "infra_run_id": "${{ github.run_id }}"
+          }
+          EOF
+          )
+
+          REPOS=(
+            "agent-operating-system"
+            "aos-realm-of-agents"
+            "business-infinity"
+            "mcp"
+            "erpnext.asisaga.com"
+            "linkedin.asisaga.com"
+            "reddit.asisaga.com"
+            "subconscious.asisaga.com"
+          )
+
+          for REPO in "${REPOS[@]}"; do
+            HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+              -X POST \
+              -H "Accept: application/vnd.github.v3+json" \
+              -H "Authorization: Bearer ${DISPATCH_TOKEN}" \
+              -H "Content-Type: application/json" \
+              "https://api.github.com/repos/${ORG}/${REPO}/dispatches" \
+              -d "{\"event_type\": \"infra_provisioned\", \"client_payload\": ${PAYLOAD}}")
+            if [[ "$HTTP_STATUS" == "204" ]]; then
+              echo "  ✅ Dispatched infra_provisioned to ${ORG}/${REPO}"
+            else
+              echo "  ⚠️  Dispatch to ${ORG}/${REPO} returned HTTP ${HTTP_STATUS} (repo may not exist or token lacks access)"
+            fi
+          done
+
+      - name: Phase result
+        id: phase_result
+        if: always()
+        run: |
+          echo "outcome=${{ steps.deploy_bicep_function_apps.outcome }}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload audit logs
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: compute-audit-${{ github.run_id }}
+          path: |
+            deployment/audit/*.json
+            orchestrator-*.log
+          retention-days: 90
+          if-no-files-found: ignore
