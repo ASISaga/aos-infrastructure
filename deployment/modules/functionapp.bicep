@@ -76,8 +76,11 @@ param customDomain string = ''
 // Variables
 // ====================================================================
 
-// One dedicated plan per app (required by Flex Consumption)
-var planName = 'plan-${appName}-${environment}'
+// One dedicated plan per app (required by Flex Consumption).
+// Keep the plan name aligned with the deterministic site suffix so legacy unsuffixed
+// plans/sites can coexist during migration without violating one-site-per-plan.
+// Length cap: "plan-" (5) + app (20) + "-" (1) + env (7) + "-" (1) + suffix (6) = 40.
+var planName = 'plan-${take(appName, 20)}-${environment}-${take(uniqueSuffix, 6)}'
 // Flex Consumption enforces a 32-character limit for site names.
 // Format: fa-<app14>-<env>-<suffix6>.
 // Worst-case length is exactly 32: "fa-" (3) + app (14) + "-" (1) + env (7) + "-" (1) + suffix (6).
