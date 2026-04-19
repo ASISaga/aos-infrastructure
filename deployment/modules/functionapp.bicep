@@ -93,9 +93,11 @@ var deploymentContainerName = 'deploy-${appName}'
 // Each Function App gets its own storage account so the Azure Functions host has an isolated
 // scope for its distributed lock, timer state, and blob lease containers.
 // Storage account names: 3-24 lowercase alphanumeric only.
-// Formula: "st" (2) + sanitised appName (6) + env prefix (4) + per-app unique hash (8) = 20 max.
+// Formula: "st" (2) + sanitized appName up to 6 chars + env prefix up to 4 chars + per-app unique hash (8) = 20 max.
 var appStorageSuffix = take(uniqueString(uniqueSuffix, appName), 8)
 var appStorageAccountName = 'st${take(replace(toLower(appName), '-', ''), 6)}${take(environment, 4)}${appStorageSuffix}'
+// LRS for dev/staging — halves storage cost vs GRS; ZRS for prod to match shared-storage resilience strategy.
+var appStorageSkuName = environment == 'prod' ? 'Standard_ZRS' : 'Standard_LRS'
 
 // RBAC role definition IDs
 var storageBlobDataOwnerRole = 'b7e6dc6d-f1e8-4753-8033-0f276bb0955b'
@@ -181,7 +183,7 @@ resource appStorageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
   tags: tags
   kind: 'StorageV2'
   sku: {
-    name: environment == 'prod' ? 'Standard_ZRS' : 'Standard_LRS'
+    name: appStorageSkuName
   }
   properties: {
     supportsHttpsTrafficOnly: true
