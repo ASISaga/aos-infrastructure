@@ -197,10 +197,10 @@ class SDKBridge:
         """Discover the AOS Function App endpoint from the live resource group.
 
         Queries the ``agent-operating-system`` Function App by its naming prefix
-        (``func-agent-operating-system-{environment}-*``) because the full name includes
+        (``fa-agent-operating-{environment}-*``) because the full name includes
         a unique suffix derived from the resource group ID at deploy time.
         """
-        prefix = f"func-agent-operating-system-{self.environment}-"
+        prefix = f"fa-agent-operating-{self.environment}-"
         try:
             credential = DefaultAzureCredential()
             client = WebSiteManagementClient(credential, self.subscription_id)

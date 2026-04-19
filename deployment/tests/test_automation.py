@@ -491,11 +491,11 @@ class TestSDKBridge:
         self, mock_web_client: mock.Mock, mock_cred: mock.Mock, bridge: SDKBridge
     ) -> None:
         mock_app = mock.MagicMock()
-        mock_app.name = "func-agent-operating-system-dev-abc123"
-        mock_app.default_host_name = "func-agent-operating-system-dev-abc123.azurewebsites.net"
+        mock_app.name = "fa-agent-operating-dev-abc123"
+        mock_app.default_host_name = "fa-agent-operating-dev-abc123.azurewebsites.net"
         mock_web_client.return_value.web_apps.list_by_resource_group.return_value = [mock_app]
         endpoint = bridge.get_aos_endpoint()
-        assert endpoint == "https://func-agent-operating-system-dev-abc123.azurewebsites.net"
+        assert endpoint == "https://fa-agent-operating-dev-abc123.azurewebsites.net"
         # Verify the SDK was called with the right resource group
         mock_web_client.return_value.web_apps.list_by_resource_group.assert_called_once_with(
             bridge.resource_group

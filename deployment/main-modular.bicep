@@ -129,9 +129,9 @@ var uniqueSuffix = uniqueString(resourceGroup().id, projectName, environment)
 
 // Core AOS orchestration hub — its URL is injected into every module's env vars for peer discovery.
 // The hostname follows the same naming formula used in functionapp.bicep:
-//   func-{appName}-{environment}-{take(uniqueSuffix,6)}.azurewebsites.net
+//   fa-{take(appName,14)}-{environment}-{take(uniqueSuffix,6)}.azurewebsites.net
 var coreAppName = 'agent-operating-system'
-var coreAppUrl = 'https://func-${coreAppName}-${environment}-${take(uniqueSuffix, 6)}.azurewebsites.net'
+var coreAppUrl = 'https://fa-${take(coreAppName, 14)}-${environment}-${take(uniqueSuffix, 6)}.azurewebsites.net'
 
 // Computed URLs — derived from deterministic naming patterns that match the variables in their
 // respective modules. Used by the A2A Connections module; not passed to Function Apps.

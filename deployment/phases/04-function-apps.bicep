@@ -69,7 +69,7 @@ var foundationAppInsightsName = 'appi-${projectName}-${environment}'
 
 // Core AOS orchestration hub URL — injected into every Function App for peer discovery.
 var coreAppName = 'agent-operating-system'
-var coreAppUrl = 'https://func-${coreAppName}-${environment}-${take(uniqueSuffix, 6)}.azurewebsites.net'
+var coreAppUrl = 'https://fa-${take(coreAppName, 14)}-${environment}-${take(uniqueSuffix, 6)}.azurewebsites.net'
 
 // ====================================================================
 // Existing Phase-1 resources (cross-phase references via `existing`)
