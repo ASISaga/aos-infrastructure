@@ -79,7 +79,8 @@ param customDomain string = ''
 // One dedicated plan per app (required by Flex Consumption)
 var planName = 'plan-${appName}-${environment}'
 // Flex Consumption enforces a 32-character limit for site names.
-// Format: fa-<app14>-<env>-<suffix6>  => max length is 32 when env='staging'.
+// Format: fa-<app14>-<env>-<suffix6>.
+// Worst-case length is exactly 32 when app part is 14 chars and env='staging' (7 chars).
 var functionAppName = 'fa-${take(appName, 14)}-${environment}-${take(uniqueSuffix, 6)}'
 var identityName = 'id-${appName}-${environment}'
 // Blob container holding the deployment package for this app
