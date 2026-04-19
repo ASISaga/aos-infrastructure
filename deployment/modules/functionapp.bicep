@@ -89,6 +89,16 @@ var identityName = 'id-${appName}-${environment}'
 // Blob container holding the deployment package for this app
 var deploymentContainerName = 'deploy-${appName}'
 
+// Per-app dedicated storage account for AzureWebJobsStorage — eliminates Host ID collision.
+// Each Function App gets its own storage account so the Azure Functions host has an isolated
+// scope for its distributed lock, timer state, and blob lease containers.
+// Storage account names: 3-24 lowercase alphanumeric only.
+// Formula: "st" (2) + sanitized appName up to 6 chars + env prefix up to 4 chars + per-app unique hash (8) = 20 max.
+var appStorageSuffix = take(uniqueString(uniqueSuffix, appName), 8)
+var appStorageAccountName = 'st${take(replace(toLower(appName), '-', ''), 6)}${take(environment, 4)}${appStorageSuffix}'
+// LRS for dev/staging — halves storage cost vs GRS; ZRS for prod to match shared-storage resilience strategy.
+var appStorageSkuName = environment == 'prod' ? 'Standard_ZRS' : 'Standard_LRS'
+
 // RBAC role definition IDs
 var storageBlobDataOwnerRole = 'b7e6dc6d-f1e8-4753-8033-0f276bb0955b'
 var storageBlobDataContributorRole = 'ba92f5b4-2d11-453d-a403-e96b0029c9fe'
@@ -163,14 +173,36 @@ resource appServicePlan 'Microsoft.Web/serverfarms@2023-12-01' = {
   }
 }
 
-// Reference existing storage account and its blob service to create per-app deployment container
-resource existingStorageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' existing = {
-  name: storageAccountName
+// Per-app storage account — dedicated AzureWebJobsStorage to prevent Host ID collision.
+// Multiple Function Apps sharing a single storage account generate the same Host ID
+// (derived from the storage account name), causing cross-app lock and timer conflicts.
+// Giving each app its own storage account gives the Functions host an isolated backing store.
+resource appStorageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
+  name: appStorageAccountName
+  location: location
+  tags: tags
+  kind: 'StorageV2'
+  sku: {
+    name: appStorageSkuName
+  }
+  properties: {
+    supportsHttpsTrafficOnly: true
+    minimumTlsVersion: 'TLS1_2'
+    allowBlobPublicAccess: false
+    accessTier: 'Hot'
+  }
 }
 
-resource blobService 'Microsoft.Storage/storageAccounts/blobServices@2023-05-01' existing = {
-  parent: existingStorageAccount
+resource appBlobService 'Microsoft.Storage/storageAccounts/blobServices@2023-05-01' = {
+  parent: appStorageAccount
   name: 'default'
+}
+
+// Reference existing shared storage account for AosStateStore RBAC scoping only.
+// AzureWebJobsStorage uses the per-app account above; the shared account provides
+// cross-module Table Storage state (AOSStateStore) and keeps its own RBAC assignments.
+resource existingStorageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' existing = {
+  name: storageAccountName
 }
 
 // References to shared resources used for RBAC scoping
@@ -184,9 +216,9 @@ resource existingServiceBusNamespace 'Microsoft.ServiceBus/namespaces@2022-10-01
   name: serviceBusNamespace
 }
 
-// Per-app blob container for deployment packages (Managed Identity access)
+// Per-app blob container for deployment packages — hosted on the per-app storage account
 resource deploymentContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = {
-  parent: blobService
+  parent: appBlobService
   name: deploymentContainerName
   properties: {
     publicAccess: 'None'
@@ -212,7 +244,7 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
       deployment: {
         storage: {
           type: 'blobContainer'
-          value: 'https://${storageAccountName}.blob.${az.environment().suffixes.storage}/${deploymentContainerName}'
+          value: 'https://${appStorageAccountName}.blob.${az.environment().suffixes.storage}/${deploymentContainerName}'
           authentication: {
             type: 'UserAssignedIdentity'
             userAssignedIdentityResourceId: userAssignedIdentity.id
@@ -237,8 +269,8 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
     siteConfig: {
       // Identity-based connections only — no connection strings or secrets
       appSettings: [
-        { name: 'AzureWebJobsStorage__accountName', value: storageAccountName }
-        { name: 'AzureWebJobsStorage__blobServiceUri', value: 'https://${storageAccountName}.blob.${az.environment().suffixes.storage}' }
+        { name: 'AzureWebJobsStorage__accountName', value: appStorageAccountName }
+        { name: 'AzureWebJobsStorage__blobServiceUri', value: 'https://${appStorageAccountName}.blob.${az.environment().suffixes.storage}' }
         { name: 'AzureWebJobsStorage__credential', value: 'managedidentity' }
         { name: 'AzureWebJobsStorage__clientId', value: userAssignedIdentity.properties.clientId }
         { name: 'FUNCTIONS_EXTENSION_VERSION', value: '~4' }
@@ -266,10 +298,11 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
   dependsOn: [deploymentContainer]
 }
 
-// RBAC — Storage Blob Data Owner on the storage account (runtime: AzureWebJobsStorage identity-based connection)
+// RBAC — Storage Blob Data Owner on the per-app storage account (runtime: AzureWebJobsStorage identity-based connection)
+// Scoped to the per-app storage account — each Function App can only manage its own host storage.
 resource storageBlobOwnerRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(storageAccountId, userAssignedIdentity.id, storageBlobDataOwnerRole)
-  scope: existingStorageAccount
+  name: guid(appStorageAccount.id, userAssignedIdentity.id, storageBlobDataOwnerRole)
+  scope: appStorageAccount
   properties: {
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', storageBlobDataOwnerRole)
     principalId: userAssignedIdentity.properties.principalId
@@ -398,3 +431,5 @@ output customDomainUrl string = !empty(customDomain) ? 'https://${customDomain}'
 // GitHub repository URL — computed from parameters (source control via the sourcecontrols ARM resource
 // is not supported for Flex Consumption plans; code is deployed via blob storage).
 output sourceControlRepoUrl string = 'https://github.com/${githubOrg}/${githubRepo}'
+// Per-app storage account name — dedicated AzureWebJobsStorage backing store for this Function App.
+output appStorageAccountName string = appStorageAccount.name
