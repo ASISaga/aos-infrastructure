@@ -197,10 +197,10 @@ class SDKBridge:
         """Discover the AOS Function App endpoint from the live resource group.
 
         Queries the ``agent-operating-system`` Function App by its naming prefix
-        (``fa-agent-operating-{environment}-*``). The ``agent-operating`` segment is
-        the 14-character app-name truncation used by the Flex Consumption naming rule.
-        The full name includes
-        a unique suffix derived from the resource group ID at deploy time.
+        (``fa-agent-operating-{environment}-*``), where ``agent-operating`` is the
+        14-character app-name truncation used by the Flex Consumption naming rule.
+        The full name includes a unique suffix derived from the resource group ID
+        at deploy time.
         """
         prefix = f"fa-agent-operating-{self.environment}-"
         try:
